@@ -43,3 +43,9 @@ def test_settings_defaults():
     s = Settings(_env_file=None)
     assert (s.discovery_batch_size, s.discovery_concurrency, s.overture_min_confidence, s.default_search_area) == (
         50, 8, 0.5, "United States")
+
+
+def test_overture_max_places_default():
+    from app.config import Settings
+
+    assert Settings(_env_file=None).overture_max_places == 25000

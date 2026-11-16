@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # Overture Maps company discovery
     overture_release: str = ""  # blank = latest release
     overture_min_confidence: float = 0.5
+    overture_max_places: int = 25000  # max places one search fetches (best-ranked kept)
     discovery_batch_size: int = 50
     discovery_concurrency: int = 8
     default_search_area: str = "United States"

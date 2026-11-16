@@ -185,3 +185,20 @@ async def test_ambiguous_area_message_reaches_search_messages_and_plan_error(wor
     with pytest.raises(PlanError, match="None of the places") as e:
         await search_companies_for_icp("x")
     assert "Portland is ambiguous" in str(e.value)
+
+
+async def test_cap_message_reaches_search_messages_and_campaign(db, world, monkeypatch):
+    _, _, set_places = world
+    set_places(place(), place(id="p2", websites=["https://newdental.com"], confidence=0.95))
+    monkeypatch.setattr(settings, "overture_max_places", 1)
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert [c["domain"] for c in cands] == ["newdental.com"]
+    assert any(m.startswith("More than 1 businesses matched. Kept the 1 best-ranked.") for m in msgs)
+    cid = await _campaign()
+    await refresh_campaign_pool(cid)
+    conn = await get_db_connection()
+    try:
+        row = await (await conn.execute("SELECT discovery_message FROM campaigns WHERE id=?", (cid,))).fetchone()
+    finally:
+        await conn.close()
+    assert "More than 1 businesses matched" in row["discovery_message"]

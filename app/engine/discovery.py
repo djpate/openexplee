@@ -312,7 +312,7 @@ async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan]):
         if plan.areas and not areas:
             raise PlanError("None of the places in the target could be used. " + " ".join(notes))
         places = await asyncio.to_thread(
-            fetch_places, release, plan.categories, areas, settings.overture_min_confidence
+            fetch_places, release, plan.categories, areas, settings.overture_min_confidence, None, messages
         )
     if not plan.is_local_business:
         if settings.serper_api_key:

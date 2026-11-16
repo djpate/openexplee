@@ -14,6 +14,7 @@ from app.config import settings
 
 S3_BASE = "s3://overturemaps-us-west-2/release"
 RELEASE_TTL = 24 * 3600
+WIDE_BOX_DEGREES = 180.0  # a box wider than this can't prune by longitude
 SUBTYPES = {
     "locality": ("locality", "localadmin"),
     "county": ("county",),
@@ -45,6 +46,8 @@ class ResolvedArea:
     boxes: list[tuple[float, float, float, float]]  # (xmin, ymin, xmax, ymax)
     region_values: set[str] | None  # address.region values allowed anywhere in the area
     country_code: str | None
+    # Optional per-box address.region filter, parallel to boxes (None entry = no extra filter).
+    box_regions: list[set[str] | None] | None = None
 
 
 def _places_glob(release: str) -> str:
@@ -162,6 +165,29 @@ def _region_values(codes, names) -> set[str]:
     return {v for v in (*(_region_suffix(c) for c in codes), *names) if v}
 
 
+def _country_boxes(con, src: str, country: str):
+    """One union box per distinct region code of a country, plus that region's filter
+    when the box is too wide to prune (antimeridian-crossing, e.g. Alaska)."""
+    rows = con.execute(
+        "SELECT region, names.\"primary\", bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax "
+        f"FROM read_parquet({_lit(src)}, hive_partitioning=1) "
+        "WHERE subtype = 'region' AND country = ?", [country]).fetchall()
+    grouped: dict[str, list] = {}
+    loose: set[tuple] = set()
+    for code, name, *box in rows:
+        if code:
+            grouped.setdefault(code, []).append((tuple(box), name))
+        else:
+            loose.add(tuple(box))
+    out: list[tuple[tuple, set[str] | None]] = [(b, None) for b in loose]
+    for code, items in grouped.items():
+        box = _union([b for b, _ in items])
+        wide = box[2] - box[0] > WIDE_BOX_DEGREES
+        out.append((box, _region_values([code], [n for _, n in items]) if wide else None))
+    out.sort(key=lambda o: o[0])
+    return [b for b, _ in out], [r for _, r in out]
+
+
 def _ambiguity_hint(kind: str) -> str:
     return "Add the country." if kind in ("region", "country") else "Add the state."
 
@@ -194,19 +220,18 @@ def resolve_areas(specs: list[AreaSpec], release: str,
                     continue
                 country = rows[0][4] or s.country_code
                 region_values = None
+                box_regions = None
                 if s.kind == "country":
-                    regions = con.execute(
-                        "SELECT bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax "
-                        f"FROM read_parquet({_lit(src)}, hive_partitioning=1) "
-                        "WHERE subtype = 'region' AND country = ?", [country]).fetchall()
-                    boxes = sorted({tuple(r) for r in regions}) or [_union(rows)]
+                    boxes, box_regions = _country_boxes(con, src, country)
+                    if not boxes:
+                        boxes, box_regions = [_union(rows)], None
                 elif s.kind == "region":
                     region_values = _region_values([r[5] for r in rows] + [s.region_code],
                                                    [s.name] + [r[6] for r in rows])
                     boxes = [_union(rows)]
                 else:
                     boxes = [_union(rows)]
-                areas.append(ResolvedArea(s.name, s.kind, s.tier, boxes, region_values, country))
+                areas.append(ResolvedArea(s.name, s.kind, s.tier, boxes, region_values, country, box_regions))
         finally:
             con.close()
     except duckdb.Error as e:
@@ -218,51 +243,80 @@ def resolve_areas(specs: list[AreaSpec], release: str,
     return areas, missing
 
 
+_PLACE_COLUMNS = (
+    "id, names.\"primary\" AS name, basic_category, websites[1] AS website, emails, phones, "
+    "brand.names.\"primary\" AS brand, confidence, addresses[1].locality AS city, "
+    "addresses[1].region AS region, addresses[1].country AS country, bbox.ymin AS lat, bbox.xmin AS lon"
+)
+
+
+def _region_filter(values: set[str]) -> tuple[str, list[str]]:
+    vals = sorted({v.upper() for v in values})
+    return (f"(upper(addresses[1].region) IN ({','.join('?' * len(vals))}) "
+            "OR addresses[1].region IS NULL OR addresses[1].region = '')", vals)
+
+
+def _cap_message(cap: int) -> str:
+    return (f"More than {cap:,} businesses matched. Kept the {cap:,} best-ranked. "
+            "Narrow the area or business types to see others.")
+
+
 def fetch_places(release: str, categories: list[str], areas: list[ResolvedArea],
-                 min_confidence: float) -> list[dict]:
+                 min_confidence: float, max_places: int | None = None,
+                 messages: list[str] | None = None) -> list[dict]:
+    """Places in the areas, one row per place at its best (lowest) tier, ranked by tier
+    then confidence. At most max_places rows (default OVERTURE_MAX_PLACES; 0 = no cap);
+    when more matched, a note goes to `messages`. Country/region filters run in SQL."""
     if not categories or not areas:
         return []
+    cap = settings.overture_max_places if max_places is None else max_places
     src = _places_glob(release)
     marks = ",".join("?" * len(categories))
     selects: list[str] = []
     params: list = []
-    for i, a in enumerate(areas):
-        for xmin, ymin, xmax, ymax in a.boxes:
-            selects.append(
-                "SELECT id, names.\"primary\" AS name, basic_category, websites[1] AS website, "
-                "emails, phones, brand.names.\"primary\" AS brand, confidence, "
-                "addresses[1].locality AS city, addresses[1].region AS region, "
-                "addresses[1].country AS country, bbox.ymin AS lat, bbox.xmin AS lon, "
-                f"{i} AS area_idx FROM read_parquet({_lit(src)}, hive_partitioning=1) "
-                "WHERE bbox.xmin BETWEEN ? AND ? AND bbox.ymin BETWEEN ? AND ? "
-                f"AND basic_category IN ({marks}) "
-                "AND operating_status IS DISTINCT FROM 'permanently_closed' "
-                "AND confidence >= ? AND len(websites) > 0"
-            )
+    for a in areas:
+        for (xmin, ymin, xmax, ymax), box_rv in zip(a.boxes, a.box_regions or [None] * len(a.boxes)):
+            where = [
+                "bbox.xmin BETWEEN ? AND ? AND bbox.ymin BETWEEN ? AND ?",
+                f"basic_category IN ({marks})",
+                "operating_status IS DISTINCT FROM 'permanently_closed'",
+                "confidence >= ? AND len(websites) > 0",
+            ]
             params += [xmin, xmax, ymin, ymax, *categories, min_confidence]
+            if a.country_code:
+                where.append("(addresses[1].country = ? OR addresses[1].country IS NULL "
+                             "OR addresses[1].country = '')")
+                params.append(a.country_code)
+            for rv in (a.region_values, box_rv):
+                if rv:
+                    clause, vals = _region_filter(rv)
+                    where.append(clause)
+                    params += vals
+            selects.append(
+                f"SELECT {_PLACE_COLUMNS}, {int(a.tier)} AS tier "
+                f"FROM read_parquet({_lit(src)}, hive_partitioning=1) WHERE " + " AND ".join(where))
+    sql = ("SELECT * FROM (" + " UNION ALL ".join(selects) + ") "
+           "QUALIFY row_number() OVER (PARTITION BY id ORDER BY tier) = 1 "
+           "ORDER BY tier, confidence DESC, id")
+    if cap > 0:
+        sql += " LIMIT ?"
+        params.append(cap + 1)
     try:
         con = _connect(src)
         try:
-            rows = con.execute(" UNION ALL ".join(selects), params).fetchall()
+            rows = con.execute(sql, params).fetchall()
         finally:
             con.close()
     except duckdb.Error as e:
         raise OvertureError(str(e)) from e
-    best: dict[str, dict] = {}
-    for (pid, name, cat, site, emails, phones, brand, conf, city, region, country,
-         lat, lon, idx) in rows:
-        a = areas[idx]
-        if a.region_values is not None and region and region not in a.region_values:
-            continue
-        if a.country_code and country and country != a.country_code:
-            continue
-        cur = best.get(pid)
-        if cur and cur["tier"] <= a.tier:
-            continue
-        best[pid] = {
-            "source_id": pid, "name": name, "category": cat, "website_url": site,
-            "emails": list(emails or []), "phones": list(phones or []), "brand": brand,
-            "confidence": conf, "city": city, "region": region, "country": country,
-            "lat": lat, "lon": lon, "tier": a.tier,
-        }
-    return sorted(best.values(), key=lambda r: (r["tier"], r["source_id"]))
+    if 0 < cap < len(rows):
+        rows = rows[:cap]
+        if messages is not None:
+            messages.append(_cap_message(cap))
+    return [{
+        "source_id": pid, "name": name, "category": cat, "website_url": site,
+        "emails": list(emails or []), "phones": list(phones or []), "brand": brand,
+        "confidence": conf, "city": city, "region": region, "country": country,
+        "lat": lat, "lon": lon, "tier": tier,
+    } for (pid, name, cat, site, emails, phones, brand, conf, city, region, country,
+           lat, lon, tier) in rows]

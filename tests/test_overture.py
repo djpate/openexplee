@@ -193,3 +193,110 @@ def test_fetch_tier_is_best_containing_area(overture_files):
 def test_fetch_wraps_duckdb_errors(overture_files):
     with pytest.raises(overture.OvertureError):
         overture.fetch_places("local", ["dental_clinic"], [area()], 0.5)
+
+
+@pytest.fixture
+def sql_rows(monkeypatch):
+    """Records every row DuckDB hands back to Python, so tests can tell SQL filtering
+    apart from filtering done afterwards in Python."""
+    seen = []
+    real = overture._connect
+
+    class Recorder:
+        def __init__(self, con):
+            self.con = con
+
+        def execute(self, *a):
+            self.con.execute(*a)
+            return self
+
+        def fetchall(self):
+            rows = self.con.fetchall()
+            seen.extend(rows)
+            return rows
+
+        def fetchone(self):
+            return self.con.fetchone()
+
+        def close(self):
+            self.con.close()
+
+    monkeypatch.setattr(overture, "_connect", lambda *src: Recorder(real(*src)))
+    return seen
+
+
+def test_country_and_region_filters_run_in_sql(overture_files, sql_rows):
+    write_places, _ = overture_files
+    write_places(overture.settings.overture_places_source, [
+        place(id="us"), place(id="nocountry", country=None), place(id="ca", country="CA"),
+        place(id="ga", region="GA"), place(id="blank", region=""),
+    ])
+    rows = overture.fetch_places("local", ["dental_clinic"],
+                                 [area("Florida", 1, FL_BOX, {"FL", "Florida"}, "US", kind="region")], 0.5)
+    assert sorted(r["source_id"] for r in rows) == ["blank", "nocountry", "us"]
+    assert sorted(r[0] for r in sql_rows) == ["blank", "nocountry", "us"]
+
+
+ALASKA_ROWS = [(-180.0, 51.0, 180.0, 71.6), (-179.1, 51.2, 179.8, 71.4)]
+
+
+def test_country_collapses_duplicate_region_rows_and_filters_wide_boxes(overture_files, sql_rows):
+    write_places, write_divisions = overture_files
+    write_divisions(overture.settings.overture_divisions_source, [
+        division(id="us", name="United States", subtype="country", region=None, box=(-179.9, 18.9, 179.9, 71.4)),
+        division(id="ak1", name="Alaska", subtype="region", region="US-AK", box=ALASKA_ROWS[0]),
+        division(id="ak2", name="Alaska", subtype="region", region="US-AK", box=ALASKA_ROWS[1]),
+        division(id="fl", name="Florida", subtype="region", box=FL_BOX),
+    ])
+    areas, _ = overture.resolve_areas([AreaSpec("United States", "country", 1)], "local")
+    assert sorted(areas[0].boxes) == sorted([ALASKA_ROWS[0], FL_BOX])
+    write_places(overture.settings.overture_places_source, [
+        place(id="anchorage", lon=-149.9, lat=61.2, region="AK"),
+        place(id="oslo", lon=10.7, lat=59.9, country="NO", region="03"),
+        place(id="oslo-nocountry", lon=10.7, lat=59.9, country=None, region="03"),
+        place(id="tampa"),
+    ])
+    sql_rows.clear()  # drop the division lookups recorded by resolve_areas
+    rows = overture.fetch_places("local", ["dental_clinic"], areas, 0.5)
+    assert sorted(r["source_id"] for r in rows) == ["anchorage", "tampa"]
+    assert sorted(r[0] for r in sql_rows) == ["anchorage", "tampa"]
+
+
+def _cap_world(write_places):
+    write_places(overture.settings.overture_places_source, [
+        place(id="t-60", confidence=0.6), place(id="t-90", confidence=0.9),
+        place(id="t-70", confidence=0.7), place(id="t-80", confidence=0.8),
+        place(id="orl-99", confidence=0.99, lon=-81.38, lat=28.54, locality="Orlando"),
+    ])
+    return [area("Tampa", 1), area("Florida", 2, FL_BOX, {"FL", "Florida"}, "US", kind="region")]
+
+
+def test_fetch_cap_keeps_best_ranked_and_says_so(overture_files, monkeypatch):
+    write_places, _ = overture_files
+    areas = _cap_world(write_places)
+    monkeypatch.setattr(overture.settings, "overture_max_places", 3)
+    msgs = []
+    rows = overture.fetch_places("local", ["dental_clinic"], areas, 0.5, messages=msgs)
+    assert [(r["source_id"], r["tier"]) for r in rows] == [("t-90", 1), ("t-80", 1), ("t-70", 1)]
+    assert msgs == ["More than 3 businesses matched. Kept the 3 best-ranked. "
+                    "Narrow the area or business types to see others."]
+
+
+def test_fetch_under_cap_returns_all_ordered_without_message(overture_files, monkeypatch):
+    write_places, _ = overture_files
+    areas = _cap_world(write_places)
+    monkeypatch.setattr(overture.settings, "overture_max_places", 5)
+    msgs = []
+    rows = overture.fetch_places("local", ["dental_clinic"], areas, 0.5, messages=msgs)
+    assert [r["source_id"] for r in rows] == ["t-90", "t-80", "t-70", "t-60", "orl-99"]
+    assert msgs == []
+
+
+def test_cap_message_uses_thousands_separator(overture_files, monkeypatch):
+    write_places, _ = overture_files
+    write_places(overture.settings.overture_places_source,
+                 [place(id=f"p{i}", confidence=0.5 + i / 10000) for i in range(1001)])
+    msgs = []
+    rows = overture.fetch_places("local", ["dental_clinic"], [area()], 0.5, max_places=1000, messages=msgs)
+    assert len(rows) == 1000 and rows[0]["source_id"] == "p1000"
+    assert msgs[0].startswith("More than 1,000 businesses matched. Kept the 1,000 best-ranked.")
