@@ -5,7 +5,7 @@ from app.database import get_db_connection
 import json
 from app.config import settings
 from app.engine.discovery import refresh_campaign_pool
-from app.engine.drafting import draft_leads, drafting_count, undrafted_lead_ids
+from app.engine.drafting import draft_leads, drafting_count, sendable_lead_ids, undrafted_lead_ids
 from app.engine.lead_builder import process_next_batch
 from app.engine.overture import OvertureError
 from app.engine.search_plan import PlanError
@@ -163,7 +163,8 @@ async def list_campaigns():
             (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'processing') as pool_processing,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status = 'sent') as sent_leads_count,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '') as ready_leads_count,
-            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND (l.personalized_body IS NULL OR l.personalized_body = '')) as undrafted_count
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND (l.personalized_body IS NULL OR l.personalized_body = '')) as undrafted_count,
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND l.personalized_body IS NOT NULL AND l.personalized_body != '') as drafted_count
         FROM campaigns c
         ORDER BY c.created_at DESC
     """)
@@ -265,8 +266,9 @@ async def trigger_campaign_discovery(campaign_id: int, background_tasks: Backgro
 
 
 @router.post("/{campaign_id}/draft")
-async def draft_campaign_emails(campaign_id: int, background_tasks: BackgroundTasks):
-    """Drafts emails for every undrafted lead in the campaign, in the background."""
+async def draft_campaign_emails(campaign_id: int, background_tasks: BackgroundTasks, redraft: bool = False):
+    """Drafts emails for every undrafted lead in the campaign, in the background. With
+    redraft=true, redrafts every sendable lead, replacing existing drafts."""
     conn = await get_db_connection()
     try:
         found = await (await conn.execute("SELECT 1 FROM campaigns WHERE id = ?", (campaign_id,))).fetchone()
@@ -274,9 +276,9 @@ async def draft_campaign_emails(campaign_id: int, background_tasks: BackgroundTa
         await conn.close()
     if not found:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    ids = await undrafted_lead_ids(campaign_id)
+    ids = await (sendable_lead_ids(campaign_id) if redraft else undrafted_lead_ids(campaign_id))
     if ids:
-        background_tasks.add_task(draft_leads, ids)
+        background_tasks.add_task(draft_leads, ids, redraft)
     return {"queued": len(ids)}
 
 

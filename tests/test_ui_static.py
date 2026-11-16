@@ -218,3 +218,15 @@ def test_settings_page_has_sender_company():
     assert 'id="settings-sender-company"' in HTML
     assert "data.sender_company" in js_function("loadSettings")
     assert "sender_company:" in js_function("handleSaveSettings")
+
+
+def test_redraft_actions_exist():
+    assert "bulkRedraftLeads(" in HTML and "redraftOne(" in HTML
+    assert "redraft: true" in js_function("bulkRedraftLeads")
+    assert "redraft=true" in HTML
+
+
+def test_campaign_card_offers_redraft(tmp_path):
+    out = run_js(tmp_path, ["escapeHtml", "renderDraftButton"],
+                 "renderDraftButton({id: 3, undrafted_count: 0, drafted_count: 24, drafting_count: 0})")
+    assert "redraftCampaignEmails(3, 24)" in out and "Redraft 24" in out

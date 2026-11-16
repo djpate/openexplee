@@ -38,14 +38,29 @@ async def undrafted_lead_ids(campaign_id: int) -> List[int]:
         await conn.close()
 
 
-async def _load(lead_id: int):
-    """The lead and its campaign's value proposition, if it is sendable and still undrafted."""
+def _draftable(overwrite: bool) -> str:
+    """Leads a draft request may touch: sendable ones, and only undrafted ones unless overwriting."""
+    return SENDABLE if overwrite else f"{SENDABLE} AND {UNDRAFTED}"
+
+
+async def sendable_lead_ids(campaign_id: int) -> List[int]:
+    """Every lead in the campaign that may still be emailed, drafted or not (for a redraft)."""
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute(f"SELECT id FROM leads WHERE campaign_id = ? AND {SENDABLE} ORDER BY id", (campaign_id,))
+        return [r["id"] for r in await cur.fetchall()]
+    finally:
+        await conn.close()
+
+
+async def _load(lead_id: int, overwrite: bool = False):
+    """The lead and its campaign's value proposition, if a draft request may touch it."""
     conn = await get_db_connection()
     try:
         cur = await conn.execute(
             f"""SELECT l.*, (SELECT value_proposition FROM campaigns c WHERE c.id = l.campaign_id)
                        AS value_proposition
-                FROM (SELECT * FROM leads WHERE id = ? AND {SENDABLE} AND {UNDRAFTED}) l""",
+                FROM (SELECT * FROM leads WHERE id = ? AND {_draftable(overwrite)}) l""",
             (lead_id,),
         )
         row = await cur.fetchone()
@@ -54,14 +69,14 @@ async def _load(lead_id: int):
         await conn.close()
 
 
-async def draft_lead(lead_id: int) -> str:
-    """Drafts one lead. Returns 'drafted', 'skipped' (sent, drafted, no email, or already
-    being drafted) or 'failed'."""
+async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
+    """Drafts one lead. Returns 'drafted', 'skipped' (sent, no email, already being drafted,
+    or already drafted unless overwrite) or 'failed'. overwrite=True replaces an existing draft."""
     if lead_id in _IN_FLIGHT:
         return "skipped"
     _IN_FLIGHT[lead_id] = -1  # claim before any await, so an overlapping request skips it
     try:
-        lead = await _load(lead_id)
+        lead = await _load(lead_id, overwrite)
         if not lead:
             return "skipped"
         _IN_FLIGHT[lead_id] = lead["campaign_id"]
@@ -83,10 +98,10 @@ async def draft_lead(lead_id: int) -> str:
             return "failed"
         conn = await get_db_connection()
         try:
-            # Only fill an empty draft: never overwrite copy someone edited meanwhile.
+            # Without overwrite, only fill an empty draft: never replace copy someone edited meanwhile.
             await conn.execute(
                 f"UPDATE leads SET personalized_subject = ?, personalized_body = ?, "
-                f"company_summary = COALESCE(company_summary, ?) WHERE id = ? AND {UNDRAFTED}",
+                f"company_summary = COALESCE(company_summary, ?) WHERE id = ? AND {_draftable(overwrite)}",
                 (subject, body, summary or None, lead_id),
             )
             await conn.commit()
@@ -100,20 +115,20 @@ async def draft_lead(lead_id: int) -> str:
         _IN_FLIGHT.pop(lead_id, None)
 
 
-async def draft_leads(lead_ids: Iterable[int]) -> Dict[str, int]:
+async def draft_leads(lead_ids: Iterable[int], overwrite: bool = False) -> Dict[str, int]:
     """Drafts many leads, at most DISCOVERY_CONCURRENCY at a time."""
     sem = asyncio.Semaphore(max(1, settings.discovery_concurrency))
 
     async def one(lid: int) -> str:
         async with sem:
-            return await draft_lead(lid)
+            return await draft_lead(lid, overwrite)
 
     results = await asyncio.gather(*(one(int(i)) for i in dict.fromkeys(lead_ids)))
     return {k: results.count(k) for k in ("drafted", "skipped", "failed")}
 
 
-async def draftable_lead_ids(lead_ids: Iterable[int]) -> List[int]:
-    """The given leads that are sendable and still undrafted, in the order given."""
+async def draftable_lead_ids(lead_ids: Iterable[int], overwrite: bool = False) -> List[int]:
+    """The given leads a draft request may touch (see _draftable), in the order given."""
     ids = list(dict.fromkeys(int(i) for i in lead_ids))
     if not ids:
         return []
@@ -121,7 +136,7 @@ async def draftable_lead_ids(lead_ids: Iterable[int]) -> List[int]:
     try:
         marks = ",".join("?" for _ in ids)
         cur = await conn.execute(
-            f"SELECT id FROM leads WHERE id IN ({marks}) AND {SENDABLE} AND {UNDRAFTED}", ids)
+            f"SELECT id FROM leads WHERE id IN ({marks}) AND {_draftable(overwrite)}", ids)
         found = {r["id"] for r in await cur.fetchall()}
         return [i for i in ids if i in found]
     finally:

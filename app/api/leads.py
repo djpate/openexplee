@@ -147,6 +147,7 @@ async def update_lead(lead_id: int, req: UpdateLeadRequest):
 
 class LeadIdsRequest(BaseModel):
     lead_ids: List[int]
+    redraft: bool = False  # bulk-draft only: replace existing drafts too
 
 
 async def delete_leads(lead_ids: List[int]) -> int:
@@ -184,10 +185,11 @@ async def bulk_delete_leads(req: LeadIdsRequest):
 
 @router.post("/bulk-draft")
 async def bulk_draft_leads(req: LeadIdsRequest, background_tasks: BackgroundTasks):
-    """Drafts emails for the selected leads that are still undrafted, in the background."""
-    ids = await draftable_lead_ids(req.lead_ids)
+    """Drafts emails for the selected leads in the background: undrafted ones, or with
+    redraft=true every sendable one, replacing existing drafts."""
+    ids = await draftable_lead_ids(req.lead_ids, overwrite=req.redraft)
     if ids:
-        background_tasks.add_task(draft_leads, ids)
+        background_tasks.add_task(draft_leads, ids, req.redraft)
     return {"queued": len(ids)}
 
 
