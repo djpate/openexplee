@@ -49,3 +49,18 @@ def test_overture_max_places_default():
     from app.config import Settings
 
     assert Settings(_env_file=None).overture_max_places == 25000
+
+
+async def test_startup_marks_interrupted_discovery_with_message(db):
+    import app.database as database
+
+    async with aiosqlite.connect(db) as c:
+        await c.execute("INSERT INTO campaigns (name, icp_prompt, status) VALUES ('a', 'p', 'discovering')")
+        await c.execute("INSERT INTO campaigns (name, icp_prompt, status, discovery_message) "
+                        "VALUES ('b', 'p', 'ready', 'kept')")
+        await c.commit()
+    await database.init_db()
+    async with aiosqlite.connect(db) as c:
+        rows = await (await c.execute("SELECT name, status, discovery_message FROM campaigns ORDER BY name")).fetchall()
+    assert rows == [("a", "error", "Interrupted by a restart. Click Find next leads to resume."),
+                    ("b", "ready", "kept")]

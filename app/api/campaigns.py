@@ -83,10 +83,14 @@ class CampaignCreate(BaseModel):
     batch_size: Optional[int] = None
 
 
-async def _set_campaign(campaign_id: int, status: str, message: Optional[str] = None):
+_KEEP = object()  # _set_campaign: leave discovery_message as it is
+
+
+async def _set_campaign(campaign_id: int, status: str, message=_KEEP):
+    """Set the status, and discovery_message unless message is _KEEP (None clears it)."""
     conn = await get_db_connection()
     try:
-        if message is None:
+        if message is _KEEP:
             await conn.execute("UPDATE campaigns SET status = ? WHERE id = ?", (status, campaign_id))
         else:
             await conn.execute(
@@ -96,6 +100,10 @@ async def _set_campaign(campaign_id: int, status: str, message: Optional[str] = 
         await conn.commit()
     finally:
         await conn.close()
+
+
+def _joined(refresh_result) -> Optional[str]:
+    return "\n".join((refresh_result or {}).get("messages") or []) or None
 
 
 def _failure_message(e: Exception) -> str:
@@ -116,11 +124,13 @@ async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
             await conn.close()
         if not camp:
             return
+        # A success replaces any stale warning or error with this run's search messages.
+        message = None
         if not camp["search_plan"]:
-            await refresh_campaign_pool(campaign_id)
+            message = _joined(await refresh_campaign_pool(campaign_id))
         res = await process_next_batch(
             campaign_id, camp["batch_size"] or settings.discovery_batch_size, camp["value_proposition"] or "")
-        await _set_campaign(campaign_id, "ready")
+        await _set_campaign(campaign_id, "ready", message)
         if auto_send:
             await dispatch_campaign_batch(campaign_id, limit=res.get("leads", 0))
     except Exception as e:
@@ -131,8 +141,8 @@ async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
 async def run_refresh_task(campaign_id: int) -> None:
     await _set_campaign(campaign_id, "discovering")
     try:
-        await refresh_campaign_pool(campaign_id)
-        await _set_campaign(campaign_id, "ready")
+        res = await refresh_campaign_pool(campaign_id)
+        await _set_campaign(campaign_id, "ready", _joined(res))
     except Exception as e:
         print(f"[Campaign Refresh Error]: {e}")
         await _set_campaign(campaign_id, "error", _failure_message(e))
@@ -219,21 +229,25 @@ async def get_campaign(campaign_id: int):
 
 
 async def _claim_discovery(campaign_id: int):
-    """Atomically move the campaign to 'discovering', or raise 404 / 409."""
+    """Atomically move the campaign to 'discovering', or raise 404 / 409
+    (already discovering, or sending)."""
     conn = await get_db_connection()
     try:
         cur = await conn.execute(
-            "UPDATE campaigns SET status = 'discovering' WHERE id = ? AND status IS NOT 'discovering'",
+            "UPDATE campaigns SET status = 'discovering' WHERE id = ? "
+            "AND (status IS NULL OR status NOT IN ('discovering', 'sending'))",
             (campaign_id,))
         await conn.commit()
         if cur.rowcount:
             return
-        cur = await conn.execute("SELECT 1 FROM campaigns WHERE id = ?", (campaign_id,))
-        exists = await cur.fetchone()
+        cur = await conn.execute("SELECT status FROM campaigns WHERE id = ?", (campaign_id,))
+        row = await cur.fetchone()
     finally:
         await conn.close()
-    if not exists:
+    if not row:
         raise HTTPException(status_code=404, detail="Campaign not found")
+    if row["status"] == "sending":
+        raise HTTPException(status_code=409, detail="Campaign is sending; try again when it finishes.")
     raise HTTPException(status_code=409, detail="Discovery is already running for this campaign.")
 
 

@@ -184,7 +184,10 @@ async def init_db():
                 pass
 
         # A discovery task dies with the server. On start, nothing can still be discovering.
-        await db.execute("UPDATE campaigns SET status = 'error' WHERE status = 'discovering'")
+        await db.execute(
+            "UPDATE campaigns SET status = 'error', "
+            "discovery_message = 'Interrupted by a restart. Click Find next leads to resume.' "
+            "WHERE status = 'discovering'")
         await db.execute("UPDATE campaign_companies SET status = 'pending' WHERE status = 'processing'")
         await db.commit()
 

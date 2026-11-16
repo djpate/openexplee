@@ -187,3 +187,52 @@ async def test_concurrent_requests_only_one_wins(db, calls, path, monkeypatch):
     async with await _client() as c:
         rs = await asyncio.gather(*[c.post(f"/api/campaigns/{cid}/{path}") for _ in range(2)])
     assert sorted(r.status_code for r in rs) == [200, 409]
+
+
+async def _set_message(cid, msg):
+    conn = await get_db_connection()
+    try:
+        await conn.execute("UPDATE campaigns SET discovery_message = ? WHERE id = ?", (msg, cid))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def test_successful_discover_with_plan_clears_stale_message(db, calls):
+    cid = await _make(status="error", plan='{"x": 1}')
+    await _set_message(cid, "HTTP 503 from s3")
+    await campaigns.run_discovery_task(cid)
+    row = await _row(cid)
+    assert row["status"] == "ready" and row["discovery_message"] is None
+
+
+async def test_successful_first_discover_shows_new_search_messages(db, calls, monkeypatch):
+    async def refresh(cid):
+        return {"inserted": 1, "pool_total": 1, "messages": ["note a", "note b"]}
+    monkeypatch.setattr(campaigns, "refresh_campaign_pool", refresh)
+    cid = await _make(status="error")
+    await _set_message(cid, "Interrupted by a restart. Click Find next leads to resume.")
+    await campaigns.run_discovery_task(cid)
+    assert (await _row(cid))["discovery_message"] == "note a\nnote b"
+
+
+@pytest.mark.parametrize("new,expected", [(["fresh note"], "fresh note"), ([], None)])
+async def test_successful_refresh_replaces_stale_message(db, calls, monkeypatch, new, expected):
+    async def refresh(cid):
+        return {"inserted": 0, "pool_total": 0, "messages": new}
+    monkeypatch.setattr(campaigns, "refresh_campaign_pool", refresh)
+    cid = await _make(status="error", plan='{"x": 1}')
+    await _set_message(cid, "HTTP 503 from s3")
+    await campaigns.run_refresh_task(cid)
+    row = await _row(cid)
+    assert row["status"] == "ready" and row["discovery_message"] == expected
+
+
+@pytest.mark.parametrize("path", ["discover", "refresh-search"])
+async def test_409_while_sending(db, calls, path):
+    cid = await _make(status="sending")
+    async with await _client() as c:
+        r = await c.post(f"/api/campaigns/{cid}/{path}")
+    assert r.status_code == 409
+    assert r.json() == {"detail": "Campaign is sending; try again when it finishes."}
+    assert (await _row(cid))["status"] == "sending" and calls["refresh"] == calls["batch"] == []
