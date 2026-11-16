@@ -26,7 +26,7 @@ Commercial outbound platforms like Explee, Apollo, and Instantly charge **$100 t
 | Feature | Explee SaaS | OpenExplee (Self-Hosted) |
 | :--- | :--- | :--- |
 | **Monthly Subscription** | $100 – $300+ / month | **$0 / month** (MIT Licensed) |
-| **Lead Discovery & ICP Search** | Proprietary database & credit system | **Crawl4AI & Organic Web Crawlers** |
+| **Lead Discovery & ICP Search** | Proprietary database & credit system | **Overture Maps open business data** (+ Serper web search for non-local targets) |
 | **Email Verification** | Paid credit consumption | **Built-in 4-Tier DNS + SMTP Handshake** ($0) |
 | **AI Personalization** | Locked to proprietary agents | **Gemini, Claude, OpenAI, Groq, or Local Ollama** |
 | **Sending Infrastructure** | Shared multi-tenant sending pool | **Your Own Lookalike Domains & Inboxes** |
@@ -41,7 +41,7 @@ Commercial outbound platforms like Explee, Apollo, and Instantly charge **$100 t
 ```mermaid
 flowchart TD
     subgraph Discovery ["1. ICP & Lead Discovery Engine"]
-        A["Natural Language ICP Query<br/>('B2B SaaS in US using Stripe')"] --> B["DuckDuckGo / Serper Web Search"]
+        A["Natural Language ICP Query<br/>('B2B SaaS in US using Stripe')"] --> B["Overture Maps open business data<br/>(Serper web search for non-local targets)"]
         B --> C["Deep Site Scraper<br/>(Extracts value prop, team, contact emails)"]
     end
 
@@ -156,3 +156,17 @@ Contributions are welcome! Feel free to submit issues or pull requests:
 
 This project is licensed under the [MIT License](LICENSE).
 
+---
+
+## Data sources & attribution
+
+Company discovery uses Overture Maps Places data. Web search through Serper is used only for non-local targets.
+
+Business data: Overture Maps Foundation (CDLA-Permissive-2.0 / Apache-2.0 / CC0)
+
+License and attribution details:
+
+* [Overture attribution](https://docs.overturemaps.org/attribution/)
+* [CDLA-Permissive-2.0](https://cdla.dev/permissive-2-0/)
+* [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
+* [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/)
