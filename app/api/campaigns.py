@@ -386,16 +386,22 @@ async def _run_campaign_dispatch_background(campaign_id: int, limit: int = 20):
 async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
     conn = await get_db_connection()
     try:
-        cur = await conn.execute("""
-            SELECT 
-                (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND status IN ('enriched', 'queued', 'discovered') AND verification_status != 'invalid' AND email IS NOT NULL AND email != '') as sendable,
+        unsent = ("status IN ('enriched', 'queued', 'discovered') AND verification_status != 'invalid' "
+                  "AND email IS NOT NULL AND email != ''")
+        cur = await conn.execute(f"""
+            SELECT
+                (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND {unsent} AND {qualified_sql()}) as sendable,
+                (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND {unsent} AND NOT {qualified_sql()}) as disqualified,
                 (SELECT COUNT(*) FROM leads WHERE campaign_id = ?) as total,
-                (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND status = 'sent') as sent
-        """, (campaign_id, campaign_id, campaign_id))
+                (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND status = 'sent') as sent,
+                (SELECT COALESCE(min_fit_score, 3) FROM campaigns WHERE id = ?) as min_fit
+        """, (campaign_id, campaign_id, campaign_id, campaign_id, campaign_id))
         row = await cur.fetchone()
         sendable = row["sendable"] if row else 0
+        disqualified = row["disqualified"] if row else 0
         total = row["total"] if row else 0
         sent = row["sent"] if row else 0
+        min_fit = row["min_fit"] if row and row["min_fit"] is not None else 3
 
         camp_cur = await conn.execute("SELECT status FROM campaigns WHERE id = ?", (campaign_id,))
         camp_row = await camp_cur.fetchone()
@@ -409,6 +415,13 @@ async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
         return {"status": "discovering", "message": "Campaign is currently discovering leads. Please wait until discovery finishes."}
 
     if sendable == 0:
+        if disqualified:
+            return {
+                "dispatched": 0,
+                "status": "all_disqualified",
+                "message": f"All {disqualified} remaining leads are disqualified (fit below {min_fit}). "
+                           "Lower 'Disqualify below' on the campaign card, or requalify leads, to send to them."
+            }
         if total > 0 and sent >= total:
             return {
                 "dispatched": 0,
