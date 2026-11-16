@@ -36,6 +36,22 @@ def test_verified_person_preferred_over_found_role_address():
     assert pick_lead_email({"email": "jo@a.com", "status": "verified"}, [("info@a.com", "risky")])[0] == "jo@a.com"
 
 
+def test_deliverable_guess_loses_to_found_address():
+    guess = {"email": "jo@a.com", "status": "deliverable"}
+    assert pick_lead_email(guess, [("info@a.com", "risky")]) == ("info@a.com", "risky", "")
+    assert pick_lead_email(guess, [("info@a.com", "invalid")]) == ("jo@a.com", "deliverable", "")
+    assert pick_lead_email(guess, []) == ("jo@a.com", "deliverable", "")
+
+
+@pytest.mark.parametrize("local", ["contact", "hello", "info", "office", "admin", "sales", "support", "team", "mail",
+                                   "Contact"])
+@pytest.mark.parametrize("status", ["verified", "deliverable"])
+def test_generic_guessed_address_never_accepted(local, status):
+    assert pick_lead_email({"email": f"{local}@a.com", "status": status}, []) == (None, "", "no_email")
+    assert pick_lead_email({"email": f"{local}@a.com", "status": status}, [("x@a.com", "invalid")]) == \
+        (None, "", "email_invalid")
+
+
 def test_no_contact_fallback():
     assert pick_lead_email(None, []) == (None, "", "no_email")
 
@@ -212,6 +228,34 @@ async def test_no_person_leaves_contact_empty(monkeypatch):
     assert not f.drafted[0]["contact_name"]
 
 
+@pytest.mark.parametrize("first,last", [("Иван", "Петров"), ("Jo", "李"), ("Иван", "Smith"), ("Jo", "")])
+async def test_name_without_ascii_letters_is_not_guessed(monkeypatch, first, last):
+    f = Fakes(monkeypatch)
+    f.people["a.com"] = [{"first_name": first, "last_name": last, "job_title": "Owner"}]
+    lead = (await enrich_company(row(), "vp"))["lead"]
+    assert f.guessed == []
+    assert lead["email"] == "info@a.com"
+    assert lead["contact_name"] == f"{first} {last}".strip()
+
+
+async def test_guess_landing_on_generic_address_is_not_a_lead(monkeypatch):
+    f = Fakes(monkeypatch)
+    f.sites["a.com"] = {"found_emails": []}
+    f.people["a.com"] = [JO]
+    f.guess["a.com"] = {"email": "contact@a.com", "status": "deliverable", "details": "greylisted"}
+    assert await enrich_company(row(), "vp") == {"skip_reason": "no_email"}
+    assert f.drafted == []
+
+
+async def test_deliverable_guess_loses_to_found_role_address(monkeypatch):
+    f = Fakes(monkeypatch)
+    f.people["a.com"] = [JO]
+    f.guess["a.com"] = {"email": "jo.smith@a.com", "status": "deliverable", "details": "MX answered 451"}
+    lead = (await enrich_company(row(), "vp"))["lead"]
+    assert (lead["email"], lead["verification_status"]) == ("info@a.com", "risky")
+    assert lead["contact_name"] == "Jo Smith"
+
+
 async def test_catch_all_guess_alone_is_not_a_lead(monkeypatch):
     f = Fakes(monkeypatch)
     f.sites["a.com"] = {"found_emails": []}
@@ -328,6 +372,56 @@ async def test_progress_written_as_each_row_finishes(db, monkeypatch):
     monkeypatch.setattr(lead_builder, "enrich_company", watching)
     await process_next_batch(cid, 3, "vp")
     assert seen == [(0, 0), (1, 1), (2, 2)]
+
+
+async def test_pool_counters_refreshed_as_each_row_finishes(db, monkeypatch):
+    f = Fakes(monkeypatch)
+    f.sites["a.com"] = {"found_emails": []}  # skip
+    f.sites["c.com"] = {"found_emails": []}  # skip
+    monkeypatch.setattr(settings, "discovery_concurrency", 1)
+    cid = await _campaign()
+    await _pool(cid, ["a.com", "b.com", "c.com", "d.com", "e.com"])
+    seen = []
+    real = lead_builder.enrich_company
+
+    async def watching(company, value_prop):
+        seen.append((await _fetch("SELECT pool_pending FROM campaigns WHERE id = ?", cid))[0]["pool_pending"])
+        return await real(company, value_prop)
+
+    monkeypatch.setattr(lead_builder, "enrich_company", watching)
+    out = await process_next_batch(cid, 3, "vp")
+
+    assert (out["leads"], out["skipped"]) == (1, 2)
+    # Rows b and c start after a skip and a lead have finished: the counter is already current.
+    assert seen[1:] == [2, 2]
+    assert (await _fetch("SELECT pool_pending FROM campaigns WHERE id = ?", cid))[0]["pool_pending"] == 2
+
+
+async def test_domain_already_a_lead_in_own_campaign_links_existing_lead(db, monkeypatch):
+    f = Fakes(monkeypatch)
+    cid = await _campaign()
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("INSERT INTO leads (campaign_id, company_name, company_domain, email, status) "
+                                 "VALUES (?, 'A', 'a.com', 'old@a.com', 'sent')", (cid,))
+        old_id = cur.lastrowid
+        await conn.commit()
+    finally:
+        await conn.close()
+    await _pool(cid, ["a.com", "b.com"])
+
+    out = await process_next_batch(cid, 10, "vp")
+
+    assert out == {"processed": 2, "leads": 1, "skipped": 0, "lead_ids": ANY}
+    assert old_id not in out["lead_ids"]
+    rows = await _fetch("SELECT domain, status, skip_reason, lead_id FROM campaign_companies "
+                        "WHERE campaign_id = ?", cid)
+    assert {r["domain"]: (r["status"], r["skip_reason"], r["lead_id"]) for r in rows} == {
+        "a.com": ("done", None, old_id), "b.com": ("done", None, out["lead_ids"][0])}
+    assert f.scraped == ["b.com"]
+    assert [d["company_domain"] for d in f.drafted] == ["b.com"]
+    leads = await _fetch("SELECT company_domain FROM leads WHERE campaign_id = ? ORDER BY id", cid)
+    assert [r["company_domain"] for r in leads] == ["a.com", "b.com"]
 
 
 async def test_concurrency_cap(db, monkeypatch):

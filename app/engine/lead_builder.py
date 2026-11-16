@@ -1,6 +1,7 @@
 """Turns campaign pool rows into leads under the real-emails-only rule."""
 import asyncio
 import json
+import re
 from typing import Optional
 
 from app.config import settings
@@ -13,7 +14,8 @@ from app.engine.verifier import enrich_person_email, verify_email_smtp
 
 # Bot walls: the site is alive but refuses scrapers, so only the Overture emails count.
 BLOCKED_ERRORS = frozenset({"HTTP 401", "HTTP 403", "HTTP 429"})
-ACCEPTED_GUESS_STATUSES = ("verified", "deliverable")
+# A guess that lands on a role mailbox was never found anywhere: it is the banned contact@ fallback.
+GENERIC_LOCAL_PARTS = frozenset({"contact", "hello", "info", "office", "admin", "sales", "support", "team", "mail"})
 MAX_FOUND_TO_VERIFY = 3
 LEAD_COLUMNS = (
     "campaign_id", "company_name", "company_domain", "website_url",
@@ -26,14 +28,26 @@ LEAD_COLUMNS = (
 def pick_lead_email(person: Optional[dict], found: list[tuple[str, str]]) -> tuple[Optional[str], str, str]:
     """Apply the lead rule. `person` is a guessed address result, `found` the checked own-domain addresses.
 
-    Returns (email, verification_status, "") for a lead, or (None, "", skip_reason).
+    Order: a `verified` guess, then the first found address that isn't `invalid`, then a `deliverable`
+    guess (the mailbox was never confirmed). Returns (email, verification_status, "") for a lead, or
+    (None, "", skip_reason).
     """
-    if person and person.get("email") and person.get("status") in ACCEPTED_GUESS_STATUSES:
-        return person["email"], person["status"], ""
+    guess = person.get("email") if person else None
+    if guess and guess.split("@")[0].lower() in GENERIC_LOCAL_PARTS:
+        guess = None
+    if guess and person.get("status") == "verified":
+        return guess, "verified", ""
     for email, status in found:
         if status != "invalid":
             return email, status, ""
+    if guess and person.get("status") == "deliverable":
+        return guess, "deliverable", ""
     return None, "", "email_invalid" if found else "no_email"
+
+
+def _ascii_letters(name: Optional[str]) -> str:
+    """What the verifier keeps of a name when it builds permutations."""
+    return re.sub(r"[^a-zA-Z]", "", name or "")
 
 
 def _json_list(value) -> list:
@@ -82,7 +96,8 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
     people = await _extract_people_with_llm(domain, text) if text else []
     person = people[0] if people else None
     guess = None
-    if person:
+    # With no ASCII letters in a name, the verifier's permutations fall back to contact@/hello@/info@.
+    if person and _ascii_letters(person.get("first_name")) and _ascii_letters(person.get("last_name")):
         guess = await enrich_person_email(person["first_name"], person["last_name"], domain)
         reasons.setdefault((guess.get("email"), guess.get("status")), guess.get("details", ""))
 
@@ -142,24 +157,39 @@ async def claim_pending(campaign_id: int, n: int) -> list[dict]:
     return sorted(rows, key=lambda r: (r["tier"] or 0, -(r["confidence"] or 0), r["id"]))
 
 
-async def _held_elsewhere(company: dict) -> bool:
-    """True when another campaign has a lead for this domain, or an earlier live pool row for it."""
+async def _gate(company: dict) -> Optional[dict]:
+    """The last check before enriching. Returns a ready result, or None to go ahead.
+
+    {"lead_id": id} when this campaign already has a lead for the domain (e.g. from before the pool);
+    {"skip_reason": "in_other_campaign"} when another campaign has a lead for it, or an earlier live
+    pool row for it.
+    """
+    domain, cid = company["domain"], company["campaign_id"]
     conn = await get_db_connection()
     try:
+        cur = await conn.execute(
+            "SELECT id FROM leads WHERE campaign_id = ? AND LOWER(company_domain) = ? ORDER BY id LIMIT 1",
+            (cid, domain))
+        own = await cur.fetchone()
+        if own:
+            return {"lead_id": own["id"]}
         cur = await conn.execute(
             "SELECT 1 FROM leads WHERE LOWER(company_domain) = ? "
             "AND (campaign_id IS NULL OR campaign_id != ?) "
             "UNION ALL "
             "SELECT 1 FROM campaign_companies WHERE domain = ? AND campaign_id != ? "
             "AND status IN ('pending', 'processing', 'done') AND id < ? LIMIT 1",
-            (company["domain"], company["campaign_id"], company["domain"], company["campaign_id"], company["id"]))
-        return await cur.fetchone() is not None
+            (domain, cid, domain, cid, company["id"]))
+        return {"skip_reason": "in_other_campaign"} if await cur.fetchone() else None
     finally:
         await conn.close()
 
 
-async def _finish_row(company: dict, result: dict) -> Optional[int]:
-    """Write the lead (if any), the row outcome and the campaign lead count in one transaction."""
+async def _finish_row(company: dict, result: dict) -> dict:
+    """Write the lead (if any), the row outcome and the campaign lead count in one transaction.
+
+    Returns {"new_lead_id": id}, {"existing_lead_id": id} or {"skip_reason": str}.
+    """
     conn = await get_db_connection()
     try:
         lead = result.get("lead")
@@ -167,17 +197,21 @@ async def _finish_row(company: dict, result: dict) -> Optional[int]:
             cur = await conn.execute(
                 f"INSERT INTO leads ({', '.join(LEAD_COLUMNS)}) VALUES ({', '.join('?' for _ in LEAD_COLUMNS)})",
                 tuple(lead[c] for c in LEAD_COLUMNS))
-            lead_id = cur.lastrowid
+            outcome = {"new_lead_id": cur.lastrowid}
             await conn.execute("UPDATE campaign_companies SET status = 'done', skip_reason = NULL, lead_id = ? "
-                               "WHERE id = ?", (lead_id, company["id"]))
+                               "WHERE id = ?", (cur.lastrowid, company["id"]))
             await conn.execute("UPDATE campaigns SET total_leads = (SELECT COUNT(*) FROM leads WHERE campaign_id = ?) "
                                "WHERE id = ?", (company["campaign_id"], company["campaign_id"]))
+        elif result.get("lead_id"):
+            outcome = {"existing_lead_id": result["lead_id"]}
+            await conn.execute("UPDATE campaign_companies SET status = 'done', skip_reason = NULL, lead_id = ? "
+                               "WHERE id = ?", (result["lead_id"], company["id"]))
         else:
-            lead_id = None
+            outcome = {"skip_reason": result["skip_reason"]}
             await conn.execute("UPDATE campaign_companies SET status = 'skipped', skip_reason = ? WHERE id = ?",
                                (result["skip_reason"], company["id"]))
         await conn.commit()
-        return lead_id
+        return outcome
     finally:
         await conn.close()
 
@@ -195,11 +229,8 @@ async def _release(company: dict) -> None:
 async def _process_row(company: dict, value_prop: str, sem: asyncio.Semaphore) -> Optional[dict]:
     async with sem:
         try:
-            if await _held_elsewhere(company):
-                result = {"skip_reason": "in_other_campaign"}
-            else:
-                result = await enrich_company(company, value_prop)
-            lead_id = await _finish_row(company, result)
+            result = await _gate(company) or await enrich_company(company, value_prop)
+            outcome = await _finish_row(company, result)
         except Exception as e:
             # Not a skip: put the row back so a later batch retries it.
             print(f"[LeadBuilder] {company.get('domain')} failed, returned to pending: {type(e).__name__}: {e}")
@@ -207,8 +238,10 @@ async def _process_row(company: dict, value_prop: str, sem: asyncio.Semaphore) -
                 await _release(company)
             except Exception as re_err:
                 print(f"[LeadBuilder] could not release {company.get('domain')}: {re_err}")
-            return None
-        return {"lead_id": lead_id, "skip_reason": result.get("skip_reason")}
+            outcome = None
+        # Every finished row moves the pool counters, so the UI is current mid-batch.
+        await refresh_pool_counters(company["campaign_id"])
+        return outcome
 
 
 async def process_next_batch(campaign_id: int, batch_size: int, value_prop: str) -> dict:
@@ -218,5 +251,6 @@ async def process_next_batch(campaign_id: int, batch_size: int, value_prop: str)
     outcomes = await asyncio.gather(*(_process_row(r, value_prop, sem) for r in rows))
     await refresh_pool_counters(campaign_id)
     done = [o for o in outcomes if o is not None]
-    lead_ids = [o["lead_id"] for o in done if o["lead_id"] is not None]
-    return {"processed": len(done), "leads": len(lead_ids), "skipped": len(done) - len(lead_ids), "lead_ids": lead_ids}
+    lead_ids = [o["new_lead_id"] for o in done if "new_lead_id" in o]
+    skipped = sum(1 for o in done if "skip_reason" in o)
+    return {"processed": len(done), "leads": len(lead_ids), "skipped": skipped, "lead_ids": lead_ids}
