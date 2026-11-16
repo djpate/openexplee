@@ -98,8 +98,12 @@ async def suppressed_domains() -> set[str]:
         await conn.close()
 
 
+# A lead the user deleted keeps its company reserved, so no campaign picks it up again.
+DELETED_BY_USER = "deleted_by_user"
+
+
 async def held_domains(exclude_campaign_id: Optional[int]) -> set[str]:
-    """Domains already held by leads or live pool rows in other campaigns."""
+    """Domains already held by leads, live pool rows, or user-deleted leads in other campaigns."""
     excl = -1 if exclude_campaign_id is None else exclude_campaign_id
     marks = ",".join("?" for _ in _HELD_POOL_STATUSES)
     conn = await get_db_connection()
@@ -111,7 +115,8 @@ async def held_domains(exclude_campaign_id: Optional[int]) -> set[str]:
         out = {r["d"] for r in await cur.fetchall()}
         cur = await conn.execute(
             f"SELECT LOWER(domain) AS d FROM campaign_companies "
-            f"WHERE campaign_id != ? AND status IN ({marks})", (excl, *_HELD_POOL_STATUSES))
+            f"WHERE campaign_id != ? AND (status IN ({marks}) OR skip_reason = ?)",
+            (excl, *_HELD_POOL_STATUSES, DELETED_BY_USER))
         out |= {r["d"] for r in await cur.fetchall()}
         return out
     finally:

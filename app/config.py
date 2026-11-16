@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = None
     anthropic_model: str = "claude-opus-5-5"
     anthropic_effort: str = "low"  # low | medium | high | xhigh | max
+    # Bulk name extraction from websites runs once per company; a small model does it for ~1/50 the cost.
+    anthropic_extraction_model: str = "claude-haiku-5-5"
     groq_api_key: Optional[str] = None
     ollama_base_url: str = "http://localhost:11434"
     thor_ollama_url: str = "http://100.114.48.60:11434"

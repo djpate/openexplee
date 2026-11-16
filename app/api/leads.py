@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from app.database import get_db_connection
 from app.engine.verifier import verify_email_smtp, generate_email_permutations, enrich_person_email
 from app.engine.copywriter import generate_cold_email
+from app.engine.company_pool import DELETED_BY_USER, refresh_pool_counters
+from app.engine.drafting import draft_leads, draftable_lead_ids
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
 
@@ -143,11 +145,54 @@ async def update_lead(lead_id: int, req: UpdateLeadRequest):
     return {"ok": True}
 
 
+class LeadIdsRequest(BaseModel):
+    lead_ids: List[int]
+
+
+async def delete_leads(lead_ids: List[int]) -> int:
+    """Deletes leads. Their companies stay in the pool, marked deleted, so no campaign
+    picks them up again; campaign counters are recomputed."""
+    ids = list(dict.fromkeys(int(i) for i in lead_ids))
+    if not ids:
+        return 0
+    marks = ",".join("?" for _ in ids)
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute(f"SELECT DISTINCT campaign_id FROM leads WHERE id IN ({marks})", ids)
+        cids = [r["campaign_id"] for r in await cur.fetchall() if r["campaign_id"] is not None]
+        await conn.execute(
+            f"UPDATE campaign_companies SET status = 'skipped', skip_reason = ?, lead_id = NULL "
+            f"WHERE lead_id IN ({marks})", (DELETED_BY_USER, *ids))
+        cur = await conn.execute(f"DELETE FROM leads WHERE id IN ({marks})", ids)
+        deleted = cur.rowcount
+        for cid in cids:
+            await conn.execute(
+                "UPDATE campaigns SET total_leads = (SELECT COUNT(*) FROM leads WHERE campaign_id = ?) "
+                "WHERE id = ?", (cid, cid))
+        await conn.commit()
+    finally:
+        await conn.close()
+    for cid in cids:
+        await refresh_pool_counters(cid)
+    return deleted
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_leads(req: LeadIdsRequest):
+    return {"deleted": await delete_leads(req.lead_ids)}
+
+
+@router.post("/bulk-draft")
+async def bulk_draft_leads(req: LeadIdsRequest, background_tasks: BackgroundTasks):
+    """Drafts emails for the selected leads that are still undrafted, in the background."""
+    ids = await draftable_lead_ids(req.lead_ids)
+    if ids:
+        background_tasks.add_task(draft_leads, ids)
+    return {"queued": len(ids)}
+
+
 @router.delete("/{lead_id}")
 async def delete_lead(lead_id: int):
-    conn = await get_db_connection()
-    await conn.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
-    await conn.commit()
-    await conn.close()
+    await delete_leads([lead_id])
     return {"ok": True}
 
