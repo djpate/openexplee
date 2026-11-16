@@ -834,6 +834,37 @@
     <div class="mt-1">Business data: Overture Maps Foundation (CDLA-Permissive-2.0 / Apache-2.0 / CC0)</div>
   </footer>
 
+  <!-- Email draft viewer / editor -->
+  <div id="draft-modal" class="hidden fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+    onclick="if (event.target === this) closeDraft()">
+    <div class="bg-slate-950 border border-slate-800 rounded-2xl p-6 w-full max-w-2xl space-y-3 shadow-2xl">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h3 class="text-white font-bold">Email draft</h3>
+          <p id="draft-meta" class="text-xs text-slate-400 mt-0.5"></p>
+        </div>
+        <button onclick="closeDraft()" title="Close" class="text-slate-400 hover:text-white text-lg leading-none">&times;</button>
+      </div>
+      <div id="draft-empty" class="hidden text-sm text-slate-400 py-4">
+        This lead has no draft yet.
+        <button onclick="draftNow()" id="draft-now-btn" class="ml-2 px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition">Draft now</button>
+      </div>
+      <div id="draft-editor" class="space-y-2">
+        <label class="block text-xs uppercase font-semibold text-slate-400">Subject</label>
+        <input type="text" id="draft-subject"
+          class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white">
+        <label class="block text-xs uppercase font-semibold text-slate-400 pt-1">Body</label>
+        <textarea id="draft-body" rows="14"
+          class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white font-sans leading-relaxed"></textarea>
+        <p class="text-[11px] text-slate-500">Text like {Hi|Hey} is varied per send. The compliance footer is added when it's sent.</p>
+        <div class="flex justify-end gap-2 pt-1">
+          <button onclick="closeDraft()" class="px-3 py-1.5 text-xs text-slate-400 hover:text-white transition">Cancel</button>
+          <button onclick="saveDraft()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition">Save draft</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Application Logic -->
   <script>
     lucide.createIcons();
@@ -1166,11 +1197,76 @@
         return;
       }
 
+      leadsById.clear();
+      leads.forEach(l => leadsById.set(Number(l.id), l));
       shownLeadIds = leads.map(l => Number(l.id));
       for (const id of [...checkedLeadIds]) if (!shownLeadIds.includes(id)) checkedLeadIds.delete(id);
       tbody.innerHTML = leads.map(l => renderLeadRow(l, checkedLeadIds.has(Number(l.id)))).join('');
       updateBulkBar();
     }
+
+    // Full draft viewer / editor. Draft text is model output: set as values, never as HTML.
+    const leadsById = new Map();
+    let draftLeadId = null;
+
+    function openDraft(id) {
+      const l = leadsById.get(Number(id));
+      if (!l) return;
+      draftLeadId = Number(id);
+      const who = [l.contact_name, l.company_name || l.company_domain].filter(Boolean).join(' · ');
+      document.getElementById('draft-meta').textContent = `To: ${l.email || '—'}${who ? '  ·  ' + who : ''}`;
+      const has = !!(l.personalized_body && l.personalized_body.trim());
+      document.getElementById('draft-empty').classList.toggle('hidden', has);
+      document.getElementById('draft-editor').classList.toggle('hidden', !has);
+      document.getElementById('draft-subject').value = l.personalized_subject || '';
+      document.getElementById('draft-body').value = l.personalized_body || '';
+      document.getElementById('draft-modal').classList.remove('hidden');
+    }
+
+    function closeDraft() {
+      document.getElementById('draft-modal').classList.add('hidden');
+      draftLeadId = null;
+    }
+
+    async function saveDraft() {
+      if (!draftLeadId) return;
+      const subject = document.getElementById('draft-subject').value.trim();
+      const body = document.getElementById('draft-body').value.trim();
+      if (!subject || !body) return showToast('Subject and body are both required', 'error');
+      const res = await fetch(`/api/leads/${draftLeadId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ personalized_subject: subject, personalized_body: body })
+      });
+      if (!res.ok) return showToast('Could not save the draft', 'error');
+      showToast('Draft saved');
+      closeDraft();
+      loadLeads();
+    }
+
+    async function draftNow() {
+      const id = draftLeadId;
+      if (!id) return;
+      const btn = document.getElementById('draft-now-btn');
+      btn.disabled = true; btn.textContent = 'Drafting...';
+      try {
+        const res = await fetch('/api/leads/bulk-draft', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_ids: [id] })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.queued) return showToast(data.detail || 'This lead can\'t be drafted (sent or no email)', 'error');
+        // Drafting runs in the background: wait for it, then show the result.
+        for (let i = 0; i < 30 && draftLeadId === id; i++) {
+          await new Promise(r => setTimeout(r, 1500));
+          await loadLeads();
+          const l = leadsById.get(id);
+          if (l && l.personalized_body) { openDraft(id); return; }
+        }
+      } finally {
+        btn.disabled = false; btn.textContent = 'Draft now';
+      }
+    }
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && draftLeadId) closeDraft(); });
 
     // Selection for bulk actions on the leads table.
     const checkedLeadIds = new Set();
@@ -1234,6 +1330,7 @@
       const site = safeHttpUrl(l.website_url);
       const domain = escapeHtml(l.company_domain || '');
       const statusClass = l.status === 'sent' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400';
+      const draftHint = l.personalized_body ? 'Read / edit draft' : 'Open';
 
       return `
           <tr class="hover:bg-slate-900/40">
@@ -1257,9 +1354,10 @@
                 ${escapeHtml(l.verification_status)}
               </span>
             </td>
-            <td class="py-3 px-4 max-w-xs">
-              <div class="text-xs font-semibold text-slate-200 truncate">${escapeHtml(l.personalized_subject || 'Not drafted yet')}</div>
+            <td class="py-3 px-4 max-w-xs cursor-pointer group" onclick="openDraft(${Number(l.id)})" title="Read the full draft">
+              <div class="text-xs font-semibold text-slate-200 truncate group-hover:text-indigo-300">${escapeHtml(l.personalized_subject || 'Not drafted yet')}</div>
               <div class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(l.personalized_body || '—')}</div>
+              <div class="text-[10px] text-indigo-400 mt-0.5 opacity-0 group-hover:opacity-100">${draftHint}</div>
             </td>
             <td class="py-3 px-4">
               <span class="text-xs font-semibold uppercase px-2 py-0.5 rounded ${statusClass}">${escapeHtml(l.status)}</span>
