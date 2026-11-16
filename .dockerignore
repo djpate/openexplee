@@ -1,0 +1,33 @@
+# Keep secrets and local state out of the image
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.sqlite
+*.sqlite3
+server.log
+
+# VCS / tooling
+.git
+.gitignore
+.ignore
+graft/
+.idea/
+.vscode/
+
+# Python build artifacts
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Not needed at runtime
+media/
+docs/
+tests/
+infra/
+cloudflare-worker/
+node_modules/
+record_demo.py
+build_viral_short.py

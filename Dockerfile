@@ -1,4 +1,5 @@
-FROM python:3.11-slim
+# 3.12+ required: app code uses PEP 701 f-string syntax (nested same-type quotes)
+FROM python:3.12-slim
 
 WORKDIR /app
 
