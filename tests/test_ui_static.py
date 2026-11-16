@@ -184,3 +184,12 @@ def test_campaign_draft_button_states(tmp_path):
 
 def test_auto_poll_keeps_refreshing_while_drafting():
     assert "drafting_count" in js_function("startAutoPoll")
+
+
+def test_settings_page_lets_user_pick_both_claude_models():
+    assert 'id="settings-anthropic-model"' in HTML and 'id="settings-extraction-model"' in HTML
+    load, save = js_function("loadSettings"), js_function("handleSaveSettings")
+    for field, el in (("anthropic_model", "settings-anthropic-model"),
+                      ("anthropic_extraction_model", "settings-extraction-model")):
+        assert f"data.{field}" in load and el in load
+        assert f"{field}:" in save and el in save

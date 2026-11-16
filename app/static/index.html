@@ -714,6 +714,26 @@
             </select>
           </div>
 
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Claude Model (Search Plans & Email Drafts)</label>
+              <input type="text" id="settings-anthropic-model" list="claude-model-options" placeholder="claude-opus-5-5"
+                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
+            </div>
+            <div>
+              <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Claude Model for Name Extraction (Runs Per Company)</label>
+              <input type="text" id="settings-extraction-model" list="claude-model-options" placeholder="claude-haiku-5-5"
+                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
+            </div>
+            <datalist id="claude-model-options">
+              <option value="claude-opus-5-5">Opus 5.5: best quality</option>
+              <option value="claude-sonnet-5-5">Sonnet 5.5: balanced</option>
+              <option value="claude-haiku-5-5">Haiku 5.5: cheapest, fast</option>
+              <option value="claude-fable-5-2">Fable 5.2: most capable, most expensive</option>
+            </datalist>
+            <p class="sm:col-span-2 text-[11px] text-slate-500 -mt-2">Used when the provider is Anthropic. Name extraction runs once for every company found, so a small model keeps batches cheap.</p>
+          </div>
+
           <div>
             <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Cal.com Booking URL (Included in Outreach CTAs)</label>
             <input type="url" id="url-booking" placeholder="https://cal.com/you/15min"
@@ -1507,6 +1527,8 @@
       const res = await fetch('/api/settings');
       const data = await res.json();
       document.getElementById('settings-provider').value = data.default_llm_provider || 'claude_cli';
+      document.getElementById('settings-anthropic-model').value = data.anthropic_model || '';
+      document.getElementById('settings-extraction-model').value = data.anthropic_extraction_model || '';
       if (data.booking_url) document.getElementById('url-booking').value = data.booking_url;
       if (data.sender_name) document.getElementById('settings-sender-name').value = data.sender_name;
       if (data.forward_to_email) document.getElementById('settings-forward-email').value = data.forward_to_email;
@@ -1526,6 +1548,8 @@
       e.preventDefault();
       const payload = {
         default_llm_provider: document.getElementById('settings-provider').value,
+        anthropic_model: document.getElementById('settings-anthropic-model').value.trim() || null,
+        anthropic_extraction_model: document.getElementById('settings-extraction-model').value.trim() || null,
         booking_url: document.getElementById('url-booking').value || null,
         sender_name: document.getElementById('settings-sender-name').value || null,
         forward_to_email: document.getElementById('settings-forward-email').value || null,
