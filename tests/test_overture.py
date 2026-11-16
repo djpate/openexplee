@@ -56,6 +56,58 @@ def test_resolve_disambiguates_by_region_code(overture_files):
     assert areas[0].boxes == [(-82.8, 27.6, -82.0, 28.2)]
 
 
+def test_region_without_code_resolves_by_name_and_division_region_column(overture_files):
+    _, write_divisions = overture_files
+    write_divisions(overture.settings.overture_divisions_source, [
+        division(id="fl", name="Florida", subtype="region", box=FL_BOX),
+        division(id="fl-city", name="Florida", subtype="locality", region="US-NY", box=(-74.4, 41.3, -74.3, 41.4)),
+        division(id="x", name="Florida", subtype="region", country="XX", region="XX-FL", box=(1, 1, 2, 2)),
+    ])
+    areas, missing = overture.resolve_areas([AreaSpec("Florida", "region", 1, None, "US")], "local")
+    assert missing == [] and areas[0].boxes == [FL_BOX]
+    assert areas[0].region_values == {"FL", "Florida"} and areas[0].country_code == "US"
+    areas, missing = overture.resolve_areas([AreaSpec("florida", "region", 1)], "local")
+    assert areas == [] and missing == ["florida"]  # FL in US and XX: ambiguous without a country
+
+
+@pytest.mark.parametrize("name,kind,regions", [
+    ("Hillsborough County", "county", ("US-FL", "US-NH")),
+    ("Portland", "locality", ("US-ME", "US-OR")),
+])
+def test_ambiguous_area_is_reported_not_unioned(overture_files, name, kind, regions):
+    _, write_divisions = overture_files
+    write_divisions(overture.settings.overture_divisions_source, [
+        division(id="a", name=name, subtype=kind, region=regions[1], box=(-123.0, 45.4, -122.4, 45.7)),
+        division(id="b", name=name, subtype=kind, region=regions[0], box=(-70.4, 43.6, -70.2, 43.7)),
+    ])
+    msgs = []
+    areas, missing = overture.resolve_areas([AreaSpec(name, kind, 1)], "local", msgs)
+    assert areas == [] and missing == [name]
+    assert f"{name} is ambiguous ({regions[0]}, {regions[1]}). Add the state." in msgs
+    areas, missing = overture.resolve_areas([AreaSpec(name, kind, 1, regions[0])], "local")
+    assert missing == [] and areas[0].boxes == [(-70.4, 43.6, -70.2, 43.7)]
+
+
+def test_same_region_rows_without_code_still_union(overture_files):
+    _, write_divisions = overture_files
+    write_divisions(overture.settings.overture_divisions_source, [
+        division(id="1", name="Pinellas County", subtype="county", box=(-82.909, 27.610, -82.541, 28.173)),
+        division(id="2", name="Pinellas County", subtype="county", box=(-82.852, 27.611, -82.583, 28.173)),
+    ])
+    msgs = []
+    areas, missing = overture.resolve_areas([AreaSpec("Pinellas County", "county", 1)], "local", msgs)
+    assert missing == [] and msgs == [] and areas[0].boxes == [(-82.909, 27.610, -82.541, 28.173)]
+
+
+def test_resolve_reports_not_found_names_in_messages(overture_files):
+    _, write_divisions = overture_files
+    write_divisions(overture.settings.overture_divisions_source, [division()])
+    msgs = []
+    overture.resolve_areas([AreaSpec("Gotham", "locality", 1, "US-FL"), AreaSpec("Tampa", "locality", 1)],
+                           "local", msgs)
+    assert msgs == ["Couldn't find these places in the map data: Gotham"]
+
+
 def test_resolve_retries_saint_st_variant(overture_files):
     _, write_divisions = overture_files
     write_divisions(overture.settings.overture_divisions_source,

@@ -306,11 +306,11 @@ async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan]):
     places: List[Dict[str, Any]] = []
     web: List[Dict[str, Any]] = []
     if plan.categories:
-        areas, unresolved = await asyncio.to_thread(resolve_areas, plan.areas, release)
-        if unresolved:
-            messages.append("Couldn't find these places in the map data: " + ", ".join(unresolved))
+        notes: List[str] = []
+        areas, _ = await asyncio.to_thread(resolve_areas, plan.areas, release, notes)
+        messages += notes
         if plan.areas and not areas:
-            raise PlanError("None of the places in the target could be found: " + ", ".join(unresolved))
+            raise PlanError("None of the places in the target could be used. " + " ".join(notes))
         places = await asyncio.to_thread(
             fetch_places, release, plan.categories, areas, settings.overture_min_confidence
         )

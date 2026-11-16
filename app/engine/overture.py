@@ -43,7 +43,7 @@ class ResolvedArea:
     kind: str
     tier: int
     boxes: list[tuple[float, float, float, float]]  # (xmin, ymin, xmax, ymax)
-    region_values: set[str] | None
+    region_values: set[str] | None  # address.region values allowed anywhere in the area
     country_code: str | None
 
 
@@ -126,7 +126,7 @@ def _name_variant(name: str) -> str | None:
 
 def _lookup(con, src: str, name: str, subtypes, region_code, country_code):
     sql = (
-        "SELECT bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax, country "
+        "SELECT bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax, country, region, names.\"primary\" "
         f"FROM read_parquet({_lit(src)}, hive_partitioning=1) "
         f"WHERE lower(names.\"primary\") = lower(?) AND subtype IN ({','.join('?' * len(subtypes))})"
     )
@@ -151,10 +151,31 @@ def _union(rows) -> tuple[float, float, float, float]:
             max(r[2] for r in rows), max(r[3] for r in rows))
 
 
-def resolve_areas(specs: list[AreaSpec], release: str) -> tuple[list[ResolvedArea], list[str]]:
+def _region_suffix(code: str | None) -> str | None:
+    """"US-FL" -> "FL" (Overture addresses mostly use the bare code)."""
+    if not code:
+        return None
+    return code.split("-", 1)[1] if "-" in code else code
+
+
+def _region_values(codes, names) -> set[str]:
+    return {v for v in (*(_region_suffix(c) for c in codes), *names) if v}
+
+
+def _ambiguity_hint(kind: str) -> str:
+    return "Add the country." if kind in ("region", "country") else "Add the state."
+
+
+def resolve_areas(specs: list[AreaSpec], release: str,
+                  messages: list[str] | None = None) -> tuple[list[ResolvedArea], list[str]]:
+    """Resolve area specs to bounding boxes. Returns (areas, unresolved names).
+    Names that match nothing or match divisions in more than one region/country
+    (ambiguous) are unresolved; user-facing notes about them go to `messages`."""
     src = _divisions_glob(release)
     areas: list[ResolvedArea] = []
     missing: list[str] = []
+    not_found: list[str] = []
+    notes: list[str] = []
     try:
         con = _connect(src)
         try:
@@ -163,6 +184,13 @@ def resolve_areas(specs: list[AreaSpec], release: str) -> tuple[list[ResolvedAre
                                s.region_code, s.country_code)
                 if not rows:
                     missing.append(s.name)
+                    not_found.append(s.name)
+                    continue
+                places = sorted({(r[4] or "", r[5] or "") for r in rows})
+                if len(places) > 1:
+                    missing.append(s.name)
+                    codes = ", ".join(region or country for country, region in places)
+                    notes.append(f"{s.name} is ambiguous ({codes}). {_ambiguity_hint(s.kind)}")
                     continue
                 country = rows[0][4] or s.country_code
                 region_values = None
@@ -173,18 +201,20 @@ def resolve_areas(specs: list[AreaSpec], release: str) -> tuple[list[ResolvedAre
                         "WHERE subtype = 'region' AND country = ?", [country]).fetchall()
                     boxes = sorted({tuple(r) for r in regions}) or [_union(rows)]
                 elif s.kind == "region":
-                    region_values = {s.name}
-                    if s.region_code and "-" in s.region_code:
-                        region_values.add(s.region_code.split("-", 1)[1])
+                    region_values = _region_values([r[5] for r in rows] + [s.region_code],
+                                                   [s.name] + [r[6] for r in rows])
                     boxes = [_union(rows)]
                 else:
                     boxes = [_union(rows)]
-                areas.append(ResolvedArea(s.name, s.kind, s.tier, boxes, region_values,
-                                          country if s.kind == "country" else s.country_code))
+                areas.append(ResolvedArea(s.name, s.kind, s.tier, boxes, region_values, country))
         finally:
             con.close()
     except duckdb.Error as e:
         raise OvertureError(str(e)) from e
+    if messages is not None:
+        if not_found:
+            messages.append("Couldn't find these places in the map data: " + ", ".join(not_found))
+        messages.extend(notes)
     return areas, missing
 
 

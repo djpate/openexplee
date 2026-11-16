@@ -8,6 +8,15 @@ from app.engine.llm import call_llm_json
 from app.engine.overture import AreaSpec
 
 VALID_KINDS = {"locality", "county", "region", "country"}
+KIND_SYNONYMS = {
+    "city": "locality", "town": "locality", "village": "locality", "municipality": "locality",
+    "neighborhood": "locality", "neighbourhood": "locality",
+    "state": "region", "province": "region",
+    "parish": "county", "borough": "county",
+    "nation": "country",
+}
+_REGION_CODE = re.compile(r"^[A-Z]{2}-[A-Z0-9]{1,3}$")
+_COUNTRY_CODE = re.compile(r"^[A-Z]{2}$")
 
 
 class PlanError(Exception):
@@ -63,35 +72,58 @@ Rules:
 - If no place is mentioned, return an empty areas list."""
 
 
-def _parse_area(a) -> tuple[AreaSpec | None, str | None]:
-    if not isinstance(a, dict) or not a.get("name"):
-        return None, None
-    kind = _snake(a.get("kind", ""))
+def _normalize_codes(region_code, country_code) -> tuple[str | None, str | None]:
+    """Uppercase and strip; "FL" + "US" (or no country) -> "US-FL". Invalid codes become None."""
+    country = str(country_code or "").strip().upper() or None
+    if country and not _COUNTRY_CODE.match(country):
+        country = None
+    region = str(region_code or "").strip().upper() or None
+    if region and "-" not in region:
+        region = f"{country or 'US'}-{region}"
+    if region and not _REGION_CODE.match(region):
+        region = None
+    return region, country
+
+
+def _parse_area(a) -> AreaSpec | None:
+    if not isinstance(a, dict) or not str(a.get("name") or "").strip():
+        return None
+    kind = _snake(a.get("kind") or "")
+    kind = KIND_SYNONYMS.get(kind, kind)
     if kind not in VALID_KINDS:
-        return None, None
+        return None
     name = str(a["name"]).strip()
-    region_code = (a.get("region_code") or None)
-    if kind == "region" and not region_code:
-        return None, (f"Dropped area '{name}': couldn't determine its region code, "
-                      "so it can't be searched. Try naming it more specifically.")
+    region_code, country_code = _normalize_codes(a.get("region_code"), a.get("country_code"))
+    if kind == "country":
+        region_code = None
     try:
         tier = int(a.get("tier") or 1)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         tier = 1
-    return AreaSpec(name, kind, tier, region_code, a.get("country_code") or None), None
+    return AreaSpec(name, kind, tier, region_code, country_code)
+
+
+def _describe_area(a) -> str:
+    if not isinstance(a, dict):
+        return str(a)[:80]
+    name = str(a.get("name") or "").strip() or "(unnamed area)"
+    kind = str(a.get("kind") or "").strip()
+    return f"{name} ({kind})" if kind else name
 
 
 async def build_search_plan(icp_prompt: str, categories: list[str]) -> SearchPlan:
     data = await call_llm_json(_build_prompt(icp_prompt, categories))
-    if not isinstance(data, dict) or not isinstance(data.get("areas", []), list) \
-            or not isinstance(data.get("categories", []), list):
+    if not isinstance(data, dict) or ("categories" not in data and "areas" not in data):
         raise PlanError("Couldn't build a search plan: the AI provider returned nothing usable.")
-    if "categories" not in data and "areas" not in data:
+    raw_cats = data.get("categories") or []
+    raw_areas = data.get("areas")
+    raw_areas = [] if raw_areas is None else raw_areas
+    if not isinstance(raw_areas, list) or not isinstance(raw_cats, list):
         raise PlanError("Couldn't build a search plan: the AI provider returned nothing usable.")
 
     allowed = set(categories)
     cats: list[str] = []
-    for c in data.get("categories", []):
+    for c in raw_cats:
         c = _snake(c)
         if c in allowed and c not in cats:
             cats.append(c)
@@ -101,13 +133,19 @@ async def build_search_plan(icp_prompt: str, categories: list[str]) -> SearchPla
 
     messages: list[str] = []
     areas: list[AreaSpec] = []
-    for a in data.get("areas", []):
-        spec, msg = _parse_area(a)
+    unusable: list[str] = []
+    for a in raw_areas:
+        spec = _parse_area(a)
         if spec:
             areas.append(spec)
-        if msg:
-            messages.append(msg)
-    if not areas:
+        else:
+            unusable.append(_describe_area(a))
+    if unusable:
+        msg = "Couldn't use these areas from the target: " + ", ".join(unusable)
+        if not areas:
+            raise PlanError(msg + ". Name a city, county, state or country.")
+        messages.append(msg)
+    if not raw_areas:
         default = settings.default_search_area
         areas = [AreaSpec(default, "country", 1)]
         messages.append(f"No search area was found in the target, so {default} will be searched.")

@@ -167,3 +167,21 @@ async def test_refresh_excludes_own_existing_lead_domains(db, world):
 
 def test_old_inline_discovery_is_gone():
     assert not hasattr(discovery, "discover_leads_for_icp")
+
+
+async def test_ambiguous_area_message_reaches_search_messages_and_plan_error(world, overture_files):
+    _, state, _ = world
+    _, write_divisions = overture_files
+    write_divisions(settings.overture_divisions_source, [
+        division(),
+        division(id="p1", name="Portland", region="US-OR", box=(-123.0, 45.4, -122.4, 45.7)),
+        division(id="p2", name="Portland", region="US-ME", box=(-70.4, 43.6, -70.2, 43.7)),
+    ])
+    state["plan"] = local_plan([AreaSpec("Tampa", "locality", 1, "US-FL", "US"), AreaSpec("Portland", "locality", 2)])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert cands and "Portland is ambiguous (US-ME, US-OR). Add the state." in msgs
+    assert not any("Couldn't find" in m for m in msgs)
+    state["plan"] = local_plan([AreaSpec("Portland", "locality", 1)])
+    with pytest.raises(PlanError, match="None of the places") as e:
+        await search_companies_for_icp("x")
+    assert "Portland is ambiguous" in str(e.value)
