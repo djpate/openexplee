@@ -211,3 +211,13 @@ async def test_lists_report_fit_counts_and_disqualified_flag(db, client):
     leads = (await client.get(f"/api/leads?campaign_id={cid}")).json()
     assert [(l["company_domain"], l["disqualified"]) for l in leads] == [
         ("good.com", 0), ("new.com", 0), ("bad.com", 1)]  # best first, disqualified last
+
+
+async def test_launch_says_when_every_remaining_lead_is_disqualified(db, client):
+    cid = await _campaign(db, min_fit=4)
+    await _lead(db, cid, "low.com", score=2, body="b")
+    await _lead(db, cid, "mid.com", score=3, body="b")
+    r = (await client.post(f"/api/campaigns/{cid}/launch")).json()
+    assert r["status"] == "all_disqualified" and r["dispatched"] == 0
+    assert "2 remaining leads" in r["message"] and "below 4" in r["message"]
+    assert "Disqualify below" in r["message"]
