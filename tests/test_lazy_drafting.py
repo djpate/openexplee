@@ -288,3 +288,54 @@ async def test_discovery_stores_summary_and_drafts_nothing(monkeypatch):
     lead = out["lead"]
     assert lead["company_summary"] == "Smiles in Tampa since 1990."
     assert lead["personalized_subject"] is None and lead["personalized_body"] is None
+
+
+# ---------- redraft: replace existing drafts ----------
+
+async def test_redraft_replaces_existing_drafts_but_never_sent_leads(db, monkeypatch):
+    copy = FakeCopy()
+    monkeypatch.setattr(drafting, "generate_cold_email", copy)
+    cid = await _campaign(db)
+    drafted = await _lead(db, cid, "a.com", subject="old", body="old body")
+    empty = await _lead(db, cid, "b.com")
+    sent = await _lead(db, cid, "c.com", status="sent", subject="old", body="old body")
+
+    res = await drafting.draft_leads([drafted, empty, sent], overwrite=True)
+
+    assert res == {"drafted": 2, "skipped": 1, "failed": 0}
+    assert sorted(c["company_domain"] for c in copy.calls) == ["a.com", "b.com"]
+    row = await _row(db, "SELECT personalized_subject, personalized_body FROM leads WHERE id=?", drafted)
+    assert (row["personalized_subject"], row["personalized_body"]) == ("hi A", "Body for a.com")
+    kept = await _row(db, "SELECT personalized_body FROM leads WHERE id=?", sent)
+    assert kept["personalized_body"] == "old body"
+
+
+async def test_bulk_redraft_endpoint(db, client, monkeypatch):
+    copy = FakeCopy()
+    monkeypatch.setattr(drafting, "generate_cold_email", copy)
+    cid = await _campaign(db)
+    a = await _lead(db, cid, "a.com", subject="old", body="old body")
+    r = await client.post("/api/leads/bulk-draft", json={"lead_ids": [a], "redraft": True})
+    assert r.status_code == 200 and r.json() == {"queued": 1}
+    assert [c["company_domain"] for c in copy.calls] == ["a.com"]
+
+
+async def test_campaign_redraft_endpoint_covers_drafted_and_undrafted(db, client, monkeypatch):
+    copy = FakeCopy()
+    monkeypatch.setattr(drafting, "generate_cold_email", copy)
+    cid = await _campaign(db)
+    await _lead(db, cid, "a.com", subject="old", body="old body")
+    await _lead(db, cid, "b.com")
+    await _lead(db, cid, "c.com", status="sent", subject="s", body="b")
+    r = await client.post(f"/api/campaigns/{cid}/draft?redraft=true")
+    assert r.status_code == 200 and r.json() == {"queued": 2}
+    assert sorted(c["company_domain"] for c in copy.calls) == ["a.com", "b.com"]
+
+
+async def test_campaign_list_reports_drafted_count(db, client):
+    cid = await _campaign(db)
+    await _lead(db, cid, "a.com", subject="s", body="b")
+    await _lead(db, cid, "b.com")
+    await _lead(db, cid, "c.com", status="sent", subject="s", body="b")
+    c = [x for x in (await client.get("/api/campaigns")).json() if x["id"] == cid][0]
+    assert c["drafted_count"] == 1 and c["undrafted_count"] == 1

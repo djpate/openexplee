@@ -334,6 +334,7 @@
         <div id="leads-bulk-bar" class="hidden mb-3 flex items-center gap-3 text-xs">
           <span class="text-slate-300"><b id="leads-selected-count">0</b> selected</span>
           <button onclick="bulkDraftLeads()" class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-semibold transition">Draft emails</button>
+          <button onclick="bulkRedraftLeads()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 rounded-lg transition">Redraft</button>
           <button onclick="bulkDeleteLeads()" class="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-lg transition">Delete</button>
           <button onclick="toggleAllLeads(false)" class="px-2 py-1 text-slate-400 hover:text-white transition">Clear</button>
         </div>
@@ -747,6 +748,11 @@
                 class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
             </div>
             <div>
+              <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Sender Company (Introduced in Emails)</label>
+              <input type="text" id="settings-sender-company" placeholder="e.g. Acme Studio"
+                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
+            </div>
+            <div>
               <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Forward Replies To (Cloudflare & DMARC)</label>
               <input type="email" id="settings-forward-email" placeholder="you@yourcompany.com"
                 class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
@@ -833,6 +839,38 @@
     OpenExplee — Free & Open-Source AI Outbound Engine &middot; Released under the MIT License
     <div class="mt-1">Business data: Overture Maps Foundation (CDLA-Permissive-2.0 / Apache-2.0 / CC0)</div>
   </footer>
+
+  <!-- Email draft viewer / editor -->
+  <div id="draft-modal" class="hidden fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+    onclick="if (event.target === this) closeDraft()">
+    <div class="bg-slate-950 border border-slate-800 rounded-2xl p-6 w-full max-w-2xl space-y-3 shadow-2xl">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h3 class="text-white font-bold">Email draft</h3>
+          <p id="draft-meta" class="text-xs text-slate-400 mt-0.5"></p>
+        </div>
+        <button onclick="closeDraft()" title="Close" class="text-slate-400 hover:text-white text-lg leading-none">&times;</button>
+      </div>
+      <div id="draft-empty" class="hidden text-sm text-slate-400 py-4">
+        This lead has no draft yet.
+        <button onclick="draftNow()" id="draft-now-btn" class="ml-2 px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition">Draft now</button>
+      </div>
+      <div id="draft-editor" class="space-y-2">
+        <label class="block text-xs uppercase font-semibold text-slate-400">Subject</label>
+        <input type="text" id="draft-subject"
+          class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white">
+        <label class="block text-xs uppercase font-semibold text-slate-400 pt-1">Body</label>
+        <textarea id="draft-body" rows="14"
+          class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white font-sans leading-relaxed"></textarea>
+        <p class="text-[11px] text-slate-500">Text like {Hi|Hey} is varied per send. The compliance footer is added when it's sent.</p>
+        <div class="flex justify-end gap-2 pt-1">
+          <button onclick="redraftOne()" id="draft-redraft-btn" title="Write a new draft with the current prompt" class="mr-auto px-3 py-1.5 text-xs text-slate-400 hover:text-indigo-300 transition">Redraft</button>
+          <button onclick="closeDraft()" class="px-3 py-1.5 text-xs text-slate-400 hover:text-white transition">Cancel</button>
+          <button onclick="saveDraft()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition">Save draft</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Application Logic -->
   <script>
@@ -949,10 +987,24 @@
       if (drafting > 0) {
         return `<span class="px-2.5 py-1.5 text-xs text-indigo-300 animate-pulse">Drafting ${drafting}&hellip;</span>`;
       }
+      const drafted = c.drafted_count || 0;
+      let out = '';
       if (undrafted > 0) {
-        return `<button onclick="draftCampaignEmails(${Number(c.id)}, ${Number(undrafted)})" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 rounded-lg text-xs font-semibold transition">Draft ${Number(undrafted)} emails</button>`;
+        out += `<button onclick="draftCampaignEmails(${Number(c.id)}, ${Number(undrafted)})" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 rounded-lg text-xs font-semibold transition">Draft ${Number(undrafted)} emails</button>`;
       }
-      return '';
+      if (drafted > 0) {
+        out += `<button onclick="redraftCampaignEmails(${Number(c.id)}, ${Number(drafted)})" title="Replace existing drafts using the current prompt" class="px-3 py-1.5 text-slate-400 hover:text-indigo-300 rounded-lg text-xs transition">Redraft ${Number(drafted)}</button>`;
+      }
+      return out;
+    }
+
+    async function redraftCampaignEmails(id, count) {
+      if (!confirm(`Redraft all ${count} drafted emails in this campaign with the current prompt? This replaces them, including any edits. Sent emails aren't touched. About $${(count * 0.008).toFixed(2)} in API usage.`)) return;
+      const res = await fetch(`/api/campaigns/${id}/draft?redraft=true`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return showToast(data.detail || 'Could not start redrafting', 'error');
+      showToast(`Redrafting ${data.queued} emails in the background...`);
+      loadCampaigns();
     }
 
     async function draftCampaignEmails(id, count) {
@@ -1166,11 +1218,83 @@
         return;
       }
 
+      leadsById.clear();
+      leads.forEach(l => leadsById.set(Number(l.id), l));
       shownLeadIds = leads.map(l => Number(l.id));
       for (const id of [...checkedLeadIds]) if (!shownLeadIds.includes(id)) checkedLeadIds.delete(id);
       tbody.innerHTML = leads.map(l => renderLeadRow(l, checkedLeadIds.has(Number(l.id)))).join('');
       updateBulkBar();
     }
+
+    // Full draft viewer / editor. Draft text is model output: set as values, never as HTML.
+    const leadsById = new Map();
+    let draftLeadId = null;
+
+    function openDraft(id) {
+      const l = leadsById.get(Number(id));
+      if (!l) return;
+      draftLeadId = Number(id);
+      const who = [l.contact_name, l.company_name || l.company_domain].filter(Boolean).join(' · ');
+      document.getElementById('draft-meta').textContent = `To: ${l.email || '—'}${who ? '  ·  ' + who : ''}`;
+      const has = !!(l.personalized_body && l.personalized_body.trim());
+      document.getElementById('draft-empty').classList.toggle('hidden', has);
+      document.getElementById('draft-editor').classList.toggle('hidden', !has);
+      document.getElementById('draft-subject').value = l.personalized_subject || '';
+      document.getElementById('draft-body').value = l.personalized_body || '';
+      document.getElementById('draft-modal').classList.remove('hidden');
+    }
+
+    function closeDraft() {
+      document.getElementById('draft-modal').classList.add('hidden');
+      draftLeadId = null;
+    }
+
+    async function saveDraft() {
+      if (!draftLeadId) return;
+      const subject = document.getElementById('draft-subject').value.trim();
+      const body = document.getElementById('draft-body').value.trim();
+      if (!subject || !body) return showToast('Subject and body are both required', 'error');
+      const res = await fetch(`/api/leads/${draftLeadId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ personalized_subject: subject, personalized_body: body })
+      });
+      if (!res.ok) return showToast('Could not save the draft', 'error');
+      showToast('Draft saved');
+      closeDraft();
+      loadLeads();
+    }
+
+    function draftNow() { return requestDraft(false, document.getElementById('draft-now-btn'), 'Draft now'); }
+
+    function redraftOne() {
+      if (!confirm('Replace this draft with a new one? Any edits are lost.')) return;
+      return requestDraft(true, document.getElementById('draft-redraft-btn'), 'Redraft');
+    }
+
+    async function requestDraft(redraft, btn, label) {
+      const id = draftLeadId;
+      if (!id) return;
+      const before = (leadsById.get(id) || {}).personalized_body || '';
+      btn.disabled = true; btn.textContent = redraft ? 'Redrafting...' : 'Drafting...';
+      try {
+        const res = await fetch('/api/leads/bulk-draft', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_ids: [id], redraft })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.queued) return showToast(data.detail || 'This lead can\'t be drafted (sent or no email)', 'error');
+        // Drafting runs in the background: wait for the new draft, then show it.
+        for (let i = 0; i < 30 && draftLeadId === id; i++) {
+          await new Promise(r => setTimeout(r, 1500));
+          await loadLeads();
+          const l = leadsById.get(id);
+          if (l && l.personalized_body && l.personalized_body !== before) { openDraft(id); return; }
+        }
+      } finally {
+        btn.disabled = false; btn.textContent = label;
+      }
+    }
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && draftLeadId) closeDraft(); });
 
     // Selection for bulk actions on the leads table.
     const checkedLeadIds = new Set();
@@ -1211,6 +1335,21 @@
       loadLeads(); loadCampaigns();
     }
 
+    async function bulkRedraftLeads() {
+      const ids = [...checkedLeadIds];
+      if (!ids.length) return;
+      if (!confirm(`Redraft ${ids.length} email${ids.length === 1 ? '' : 's'} with the current prompt? This replaces their drafts, including any edits. About $${(ids.length * 0.008).toFixed(2)} in API usage.`)) return;
+      const res = await fetch('/api/leads/bulk-draft', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_ids: ids, redraft: true })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return showToast(data.detail || 'Could not start redrafting', 'error');
+      showToast(data.queued ? `Redrafting ${data.queued} email${data.queued === 1 ? '' : 's'} in the background...`
+                            : 'Nothing to redraft: the selected leads are sent or have no email.');
+      toggleAllLeads(false);
+      loadLeads(); loadCampaigns();
+    }
+
     async function bulkDeleteLeads() {
       const ids = [...checkedLeadIds];
       if (!ids.length) return;
@@ -1234,6 +1373,7 @@
       const site = safeHttpUrl(l.website_url);
       const domain = escapeHtml(l.company_domain || '');
       const statusClass = l.status === 'sent' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400';
+      const draftHint = l.personalized_body ? 'Read / edit draft' : 'Open';
 
       return `
           <tr class="hover:bg-slate-900/40">
@@ -1257,9 +1397,10 @@
                 ${escapeHtml(l.verification_status)}
               </span>
             </td>
-            <td class="py-3 px-4 max-w-xs">
-              <div class="text-xs font-semibold text-slate-200 truncate">${escapeHtml(l.personalized_subject || 'Not drafted yet')}</div>
+            <td class="py-3 px-4 max-w-xs cursor-pointer group" onclick="openDraft(${Number(l.id)})" title="Read the full draft">
+              <div class="text-xs font-semibold text-slate-200 truncate group-hover:text-indigo-300">${escapeHtml(l.personalized_subject || 'Not drafted yet')}</div>
               <div class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(l.personalized_body || '—')}</div>
+              <div class="text-[10px] text-indigo-400 mt-0.5 opacity-0 group-hover:opacity-100">${draftHint}</div>
             </td>
             <td class="py-3 px-4">
               <span class="text-xs font-semibold uppercase px-2 py-0.5 rounded ${statusClass}">${escapeHtml(l.status)}</span>
@@ -1531,6 +1672,7 @@
       document.getElementById('settings-extraction-model').value = data.anthropic_extraction_model || '';
       if (data.booking_url) document.getElementById('url-booking').value = data.booking_url;
       if (data.sender_name) document.getElementById('settings-sender-name').value = data.sender_name;
+      if (data.sender_company) document.getElementById('settings-sender-company').value = data.sender_company;
       if (data.forward_to_email) document.getElementById('settings-forward-email').value = data.forward_to_email;
       if (data.reply_cc_email) document.getElementById('settings-reply-cc').value = data.reply_cc_email;
       if (data.postal_address) document.getElementById('settings-postal-address').value = data.postal_address;
@@ -1552,6 +1694,7 @@
         anthropic_extraction_model: document.getElementById('settings-extraction-model').value.trim() || null,
         booking_url: document.getElementById('url-booking').value || null,
         sender_name: document.getElementById('settings-sender-name').value || null,
+        sender_company: document.getElementById('settings-sender-company').value || null,
         forward_to_email: document.getElementById('settings-forward-email').value || null,
         reply_cc_email: document.getElementById('settings-reply-cc').value || null,
         postal_address: document.getElementById('settings-postal-address').value || null,

@@ -193,3 +193,40 @@ def test_settings_page_lets_user_pick_both_claude_models():
                       ("anthropic_extraction_model", "settings-extraction-model")):
         assert f"data.{field}" in load and el in load
         assert f"{field}:" in save and el in save
+
+
+# Draft viewer: read and edit the full draft.
+def test_draft_viewer_controls_exist_and_use_values_not_html():
+    for s in ('id="draft-modal"', 'id="draft-subject"', 'id="draft-body"', 'id="draft-meta"',
+              "saveDraft(", "closeDraft(", "draftNow("):
+        assert s in HTML, s
+    opener = js_function("openDraft")
+    assert ".value" in opener and "innerHTML" not in opener  # draft text is LLM output: never HTML
+    save = js_function("saveDraft")
+    assert "/api/leads/" in save and "'PUT'" in save
+    assert "personalized_subject" in save and "personalized_body" in save
+
+
+def test_lead_row_opens_the_full_draft(tmp_path):
+    out = run_js(tmp_path, ["escapeHtml", "safeHttpUrl", "renderLeadRow"],
+                 "renderLeadRow({id: 9, company_domain: 'a.com', status: 'enriched', "
+                 "personalized_subject: 's', personalized_body: 'b'})")
+    assert "openDraft(9)" in out
+
+
+def test_settings_page_has_sender_company():
+    assert 'id="settings-sender-company"' in HTML
+    assert "data.sender_company" in js_function("loadSettings")
+    assert "sender_company:" in js_function("handleSaveSettings")
+
+
+def test_redraft_actions_exist():
+    assert "bulkRedraftLeads(" in HTML and "redraftOne(" in HTML
+    assert "redraft: true" in js_function("bulkRedraftLeads")
+    assert "redraft=true" in HTML
+
+
+def test_campaign_card_offers_redraft(tmp_path):
+    out = run_js(tmp_path, ["escapeHtml", "renderDraftButton"],
+                 "renderDraftButton({id: 3, undrafted_count: 0, drafted_count: 24, drafting_count: 0})")
+    assert "redraftCampaignEmails(3, 24)" in out and "Redraft 24" in out
