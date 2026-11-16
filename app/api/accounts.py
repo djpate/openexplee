@@ -21,7 +21,7 @@ class InboxCreate(BaseModel):
     smtp_password: str
     reply_to: Optional[str] = None
     cc_email: Optional[str] = None
-    daily_quota: Optional[int] = 35
+    daily_quota: Optional[int] = None  # None: MAX_DAILY_SENDS_PER_INBOX
     allow_primary_domain: bool = False
 
 
@@ -89,7 +89,8 @@ async def create_inbox(req: InboxCreate):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 100)
         """, (
             req.email, req.display_name, req.provider, smtp_host, smtp_port,
-            req.smtp_user, req.smtp_password, req.reply_to, req.cc_email, req.daily_quota
+            req.smtp_user, req.smtp_password, req.reply_to, req.cc_email,
+            req.daily_quota or settings.max_daily_sends_per_inbox
         ))
         inbox_id = cursor.lastrowid
         await conn.commit()

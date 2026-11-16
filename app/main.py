@@ -16,6 +16,7 @@ from app.api.cloudflare import router as cloudflare_router
 from app.api.mcp import router as mcp_router
 from app.api.mailbox import router as mailbox_router
 from app.engine.scheduler import run_scheduler_loop
+from app.engine.sequencer import release_interrupted_sends
 
 
 @asynccontextmanager
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
     # Initialize SQLite schema and tables
     await init_db()
     await load_persisted_settings()
+    await release_interrupted_sends()
     scheduler_task = asyncio.create_task(run_scheduler_loop(interval_seconds=300))
     print("[OpenExplee] Database, persisted settings, and follow-up scheduler initialized.")
     try:

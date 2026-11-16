@@ -3,7 +3,8 @@ import random
 import ssl
 from email.message import EmailMessage
 from email.utils import make_msgid, formatdate
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import aiosmtplib
 import httpx
 from typing import Dict, Any, Optional
@@ -28,6 +29,40 @@ async def get_next_available_inbox() -> Optional[Dict[str, Any]]:
         if row:
             return dict(row)
         return None
+    finally:
+        await conn.close()
+
+
+def in_send_window(now: Optional[datetime] = None) -> bool:
+    """True during the configured sending hours (weekdays only, by default) in SEND_TIMEZONE."""
+    local = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(settings.send_timezone))
+    if settings.send_weekdays_only and local.weekday() >= 5:
+        return False
+    return settings.send_window_start_hour <= local.hour < settings.send_window_end_hour
+
+
+def send_window_text() -> str:
+    days = "Mon-Fri" if settings.send_weekdays_only else "every day"
+    return (f"{days} {settings.send_window_start_hour}:00-{settings.send_window_end_hour}:00 "
+            f"{settings.send_timezone}")
+
+
+def _smtp_tls_context(provider: Optional[str]) -> ssl.SSLContext:
+    """Certificates are checked for the big providers; self-hosted relays may use self-signed ones."""
+    ctx = ssl.create_default_context()
+    if provider not in ("google", "outlook"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+async def release_interrupted_sends() -> int:
+    """A restart kills background sends; campaigns left 'sending' go back to 'ready'."""
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("UPDATE campaigns SET status = 'ready' WHERE status = 'sending'")
+        await conn.commit()
+        return cur.rowcount
     finally:
         await conn.close()
 
@@ -174,10 +209,7 @@ async def _send_via_smtp(
     use_tls = (port == 465)
     start_tls = (port == 587 or bool(inbox.get("use_tls", 1)))
 
-    # Configure TLS context to accept self-signed certificates on private/VPS relays
-    tls_context = ssl.create_default_context()
-    tls_context.check_hostname = False
-    tls_context.verify_mode = ssl.CERT_NONE
+    tls_context = _smtp_tls_context(inbox.get("provider"))
 
     smtp_client = aiosmtplib.SMTP(
         hostname=inbox["smtp_host"],
@@ -324,6 +356,10 @@ async def dispatch_campaign_batch(campaign_id: int, limit: int = 10) -> Dict[str
         }
 
     for lead in leads:
+        if not in_send_window():
+            errors.append(f"Outside sending hours ({send_window_text()}). "
+                          "The rest will go out when you launch again during sending hours.")
+            break
         inbox = await get_next_available_inbox()
         if not inbox:
             errors.append("No active inboxes available with remaining daily quota.")
@@ -355,9 +391,10 @@ async def dispatch_campaign_batch(campaign_id: int, limit: int = 10) -> Dict[str
 
         if send_res["success"]:
             dispatched += 1
-            # Random jitter between sends to mimic human behavior
-            delay = random.randint(settings.min_delay_seconds, settings.max_delay_seconds)
-            await asyncio.sleep(min(delay, 5))  # Sleep up to 5s in batch loop for responsiveness
+            # Space sends out like a person would (MIN/MAX_DELAY_SECONDS, 2-5 minutes by default).
+            # This runs in the background, so the wait doesn't block anything.
+            if lead is not leads[-1]:
+                await asyncio.sleep(random.randint(settings.min_delay_seconds, settings.max_delay_seconds))
         else:
             errors.append(f"Failed to send to {lead['email']}: {send_res.get('error')}")
 

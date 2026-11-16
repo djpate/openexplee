@@ -60,9 +60,14 @@ class Settings(BaseSettings):
 
     # Sending & Deliverability Safeguards
     protected_primary_domains: str = ""  # your main domain(s), comma-separated; never send from these
-    max_daily_sends_per_inbox: int = 35
+    max_daily_sends_per_inbox: int = 5  # default daily limit for new inboxes; raise it as an inbox warms up
     min_delay_seconds: int = 120
     max_delay_seconds: int = 300
+    # Cold emails and follow-ups only go out on these days and hours, in this timezone.
+    send_timezone: str = "America/New_York"
+    send_window_start_hour: int = 9
+    send_window_end_hour: int = 17
+    send_weekdays_only: bool = True
     warmup_enabled: bool = True
     warmup_daily_target: int = 15
 

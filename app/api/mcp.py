@@ -1,3 +1,4 @@
+import asyncio
 import json
 from fastapi import APIRouter, Request
 from typing import Dict, Any, List
@@ -112,6 +113,10 @@ MCP_TOOLS = [
 ]
 
 
+# Keeps background send tasks referenced until they finish.
+_BACKGROUND: set = set()
+
+
 async def _execute_tool(name: str, args: Dict[str, Any]) -> Any:
     if name == "search_companies":
         _, cands, _, _ = await search_companies_for_icp(args["definition"])
@@ -149,7 +154,11 @@ async def _execute_tool(name: str, args: Dict[str, Any]) -> Any:
     if name == "check_domain_health":
         return await check_domain_dns_health(args["domain"])
     if name == "dispatch_campaign":
-        return await dispatch_campaign_batch(int(args["campaign_id"]), limit=int(args.get("limit", 10)))
+        # Sends are minutes apart, so run the batch in the background instead of holding the call open.
+        task = asyncio.create_task(dispatch_campaign_batch(int(args["campaign_id"]), limit=int(args.get("limit", 10))))
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
+        return {"status": "started", "message": "Sending in the background, a few minutes apart, during sending hours."}
     raise ValueError(f"Unknown tool: {name}")
 
 

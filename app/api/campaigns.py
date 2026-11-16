@@ -10,7 +10,8 @@ from app.engine.fit import campaign_lead_ids, qualified_sql, rate_leads, rating_
 from app.engine.lead_builder import process_next_batch
 from app.engine.overture import OvertureError
 from app.engine.search_plan import PlanError
-from app.engine.sequencer import dispatch_campaign_batch, get_next_available_inbox
+from app.engine import sequencer as _sequencer
+from app.engine.sequencer import dispatch_campaign_batch, get_next_available_inbox, send_window_text
 from app.engine.analyzer import analyze_my_product
 from app.engine.copywriter import default_draft_instructions
 
@@ -434,6 +435,13 @@ async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
             "message": "No leads in this campaign yet. Click 'Find Leads' first to discover prospects."
         }
 
+    if not _sequencer.in_send_window():
+        return {
+            "dispatched": 0,
+            "status": "outside_window",
+            "message": f"Outside sending hours ({send_window_text()}). Launch again during sending hours."
+        }
+
     inbox = await get_next_available_inbox()
     if not inbox:
         conn = await get_db_connection()
@@ -465,7 +473,8 @@ async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_campaign_dispatch_background, campaign_id, 20)
     return {
         "status": "sending",
-        "message": f"Started dispatching {sendable} emails in the background!",
+        "message": (f"Sending up to {sendable} emails in the background, a few minutes apart. "
+                    "Each inbox stops at its daily limit."),
         "queue_count": sendable
     }
 

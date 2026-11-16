@@ -5,6 +5,22 @@ from email_validator import validate_email, EmailNotValidError
 from typing import Dict, Any, List, Optional
 import aiosmtplib
 
+# Name we give mail servers when checking an address (HELO/EHLO).
+VERIFY_HELO = "verify.openexplee.local"
+
+# A 5xx reply only means "no such mailbox" when it says so; 5.7.x is a block or policy refusal.
+_UNKNOWN_MAILBOX = re.compile(
+    r"\b5\.1\.\d+\b|\b5\.4\.1\b|does not exist|doesn't exist|user unknown|unknown user|no such user"
+    r"|mailbox unavailable|mailbox not found|recipient not found|invalid recipient|address rejected"
+    r"|not a valid mailbox|unrouteable|unknown recipient", re.I)
+
+
+def _mailbox_unknown(code: int, message: str) -> bool:
+    if code not in (550, 551, 553) or re.search(r"\b5\.7\.\d+\b", message or ""):
+        return False
+    return bool(_UNKNOWN_MAILBOX.search(message or ""))
+
+
 DISPOSABLE_DOMAINS = {
     "mailinator.com", "guerrillamail.com", "tempmail.com", "10minutemail.com",
     "sharklasers.com", "getairmail.com", "dispostable.com", "yopmail.com"
@@ -92,60 +108,55 @@ async def verify_email_smtp(email: str, timeout: float = 2.0) -> Dict[str, Any]:
     primary_mx = mx_hosts[0]
     result["mx_host"] = primary_mx
 
-    # Tier 4: Direct SMTP Handshake check
+    # Tier 4: ask the mail server about the mailbox (MAIL FROM:<> -> RCPT TO -> QUIT), sending nothing.
     try:
         smtp_client = aiosmtplib.SMTP(
-            hostname=primary_mx,
-            port=25,
-            timeout=timeout,
-            use_tls=False
+            hostname=primary_mx, port=25, timeout=timeout, use_tls=False, start_tls=False,
+            local_hostname=VERIFY_HELO,
         )
         await smtp_client.connect()
-        await smtp_client.ehlo("verify.openexplee.local")
-        
-        # Test Sender
-        code, _ = await smtp_client.mail("check@verify.openexplee.local")
-        if code >= 400:
-            result["status"] = "deliverable"
-            result["details"] = f"MX server active ({primary_mx}), handshake limited by greylisting."
-            result["score"] = 80
-            await smtp_client.quit()
-            return result
-
-        # Test Target Recipient
-        rcpt_code, rcpt_msg = await smtp_client.rcpt(email)
-        
-        if rcpt_code == 250:
-            # Test Catch-All by checking a definitely random address
-            random_test = f"check_catchall_987654@{domain}"
-            c_code, _ = await smtp_client.rcpt(random_test)
-            if c_code == 250:
-                result["status"] = "catch_all"
-                result["details"] = "Domain accepts all mailboxes (Catch-all)."
-                result["score"] = 70
-            else:
-                result["status"] = "verified"
-                result["details"] = "Mailbox exists and is confirmed deliverable."
-                result["score"] = 99
-        elif rcpt_code in [550, 551, 552, 553, 554]:
-            result["status"] = "invalid"
-            result["details"] = f"Mailbox rejected by server: {rcpt_msg}"
-            result["score"] = 0
-        else:
-            result["status"] = "deliverable"
-            result["details"] = f"MX answered with code {rcpt_code}"
-            result["score"] = 85
-
         try:
-            await smtp_client.quit()
-        except Exception:
-            pass
+            await smtp_client.mail("")  # null sender, as bounce messages use
+            try:
+                rcpt = await smtp_client.rcpt(email)
+            except aiosmtplib.SMTPRecipientRefused as exc:
+                if _mailbox_unknown(exc.code, exc.message):
+                    result["status"] = "invalid"
+                    result["score"] = 0
+                    result["details"] = f"Mailbox rejected by server: {exc.code} {exc.message[:120]}"
+                else:
+                    # Blocked IP, policy or greylisting: the server didn't say whether the mailbox exists.
+                    result["status"] = "risky"
+                    result["score"] = 40
+                    result["details"] = f"Server didn't confirm the mailbox ({exc.code} {exc.message[:120]})."
+                return result
+
+            if rcpt.code != 250:
+                result["status"] = "deliverable"
+                result["score"] = 85
+                result["details"] = f"MX answered with code {rcpt.code}"
+                return result
+            try:
+                await smtp_client.rcpt(f"check_catchall_987654@{domain}")
+                result["status"] = "catch_all"
+                result["score"] = 70
+                result["details"] = "Domain accepts all mailboxes (Catch-all)."
+            except aiosmtplib.SMTPRecipientRefused:
+                result["status"] = "verified"
+                result["score"] = 99
+                result["details"] = "Mailbox exists and is confirmed deliverable."
+        finally:
+            try:
+                await smtp_client.quit()
+            except Exception:
+                pass
 
     except Exception as e:
-        # Port 25 blocked or timed out: the domain takes mail, but nobody asked about this mailbox.
+        # Port 25 blocked, timed out, or refused the check: the domain takes mail, but the mailbox is unconfirmed.
         result["status"] = "risky"
         result["score"] = 40
-        result["details"] = f"Domain has mail servers ({primary_mx}). Mailbox not checked ({type(e).__name__})."
+        detail = f"{e.code} {str(e.message)[:120]}" if isinstance(e, aiosmtplib.SMTPResponseException) else type(e).__name__
+        result["details"] = f"Domain has mail servers ({primary_mx}). Mailbox not checked ({detail})."
 
     return result
 
