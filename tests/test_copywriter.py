@@ -129,3 +129,34 @@ async def test_fallback_template_never_asks_for_a_call(sender, monkeypatch):
     monkeypatch.setattr(copywriter, "call_llm_json", none)
     out = await copywriter.generate_cold_email(**LEAD)
     assert "call" not in out["body"].lower() and "reply" in out["body"].lower()
+
+
+# ---------- grounded in verified website facts ----------
+
+FACTS = ["They already use FareHarbor for online booking, scheduling or ordering.", "They have a contact form."]
+
+
+async def test_prompt_lists_verified_facts_with_a_fixed_grounding_rule(sender, captured):
+    await copywriter.generate_cold_email(**LEAD, site_facts=FACTS)
+    p = captured[0]
+    assert "What we verified on their website" in p
+    assert all(f in p for f in FACTS)
+    assert "Only offer what these facts support" in p
+    assert "unless a fact below says so" in p
+
+
+async def test_custom_instructions_cannot_drop_the_facts_or_rule(sender, captured):
+    await copywriter.generate_cold_email(**LEAD, site_facts=FACTS, instructions="Be very brief.")
+    p = captured[0]
+    assert all(f in p for f in FACTS) and "Only offer what these facts support" in p
+
+
+async def test_no_facts_means_nothing_verified_and_keep_the_offer_general(sender, captured):
+    await copywriter.generate_cold_email(**LEAD)
+    p = captured[0]
+    assert "Nothing about their website was verified" in p and "keep what we offer general" in p
+
+
+async def test_facts_about_what_we_did_not_find_are_never_told_to_the_prospect(sender, captured):
+    await copywriter.generate_cold_email(**LEAD, site_facts=FACTS)
+    assert "Never tell them about something we didn't find" in captured[0]

@@ -238,3 +238,9 @@ def test_email_instructions_editor_exists():
         assert s in HTML, s
     assert ".value" in js_function("openInstructions") and "innerHTML" not in js_function("openInstructions")
     assert "draft_instructions" in js_function("handleCreateCampaign")
+
+
+def test_draft_viewer_shows_site_facts_as_text():
+    assert 'id="draft-facts"' in HTML
+    opener = js_function("openDraft")
+    assert "site_facts" in opener and "textContent" in opener and "innerHTML" not in opener

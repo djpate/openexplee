@@ -6,6 +6,12 @@ from typing import Dict, Any, List, Optional
 
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
+# Links worth reading for how customers book, order or pay (checked first), then for who runs it.
+BOOKING_KEYWORDS = ["book", "reserv", "schedul", "appointment", "order", "menu", "rates", "ticket"]
+ABOUT_KEYWORDS = ["about", "team", "leadership", "founder", "contact", "product", "feature", "pricing", "platform"]
+MAX_BOOKING_PAGES = 2
+MAX_ABOUT_PAGES = 3
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -34,6 +40,9 @@ async def scrape_company_website(url: str, max_depth: int = 1) -> Dict[str, Any]
         "found_emails": set(),
         "team_leads": [],
         "subpages": [],
+        # Raw HTML of each page read ({url, html, kind}), for site_check. Not stored.
+        "pages": [],
+        "final_url": url,
     }
 
     try:
@@ -44,6 +53,8 @@ async def scrape_company_website(url: str, max_depth: int = 1) -> Dict[str, Any]
                 return intel
 
             soup = BeautifulSoup(resp.text, "html.parser")
+            intel["final_url"] = str(resp.url)
+            intel["pages"].append({"url": str(resp.url), "html": resp.text, "kind": "home"})
 
             # Extract basic metadata
             if soup.title:
@@ -68,22 +79,30 @@ async def scrape_company_website(url: str, max_depth: int = 1) -> Dict[str, Any]
                 if not any(ext in match.lower() for ext in [".png", ".jpg", ".svg", ".webp", "sentry", "example"]):
                     intel["found_emails"].add(match.lower())
 
-            # Find internal links to About/Team/Product/Pricing pages
-            about_urls = []
+            # Internal links: booking/ordering pages first (how customers buy), then About/Team pages.
+            home_host = urlparse(str(resp.url)).netloc
+            booking_urls, about_urls = [], []
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
                 text = a.get_text(strip=True).lower()
-                full_url = urljoin(url, href)
-                if urlparse(full_url).netloc == parsed.netloc:
-                    if any(kw in text or kw in href.lower() for kw in ["about", "team", "leadership", "founder", "contact", "product", "feature", "pricing", "platform"]):
-                        if full_url not in about_urls and full_url != url:
-                            about_urls.append(full_url)
+                full_url = urljoin(str(resp.url), href).split("#")[0]
+                if urlparse(full_url).netloc not in (parsed.netloc, home_host) or full_url in (url, str(resp.url)):
+                    continue
+                target = (text + " " + href.lower())
+                if any(kw in target for kw in BOOKING_KEYWORDS):
+                    if full_url not in booking_urls:
+                        booking_urls.append(full_url)
+                elif any(kw in target for kw in ABOUT_KEYWORDS):
+                    if full_url not in about_urls:
+                        about_urls.append(full_url)
 
-            # Crawl up to 4 subpages for deep product & team extraction
-            for sub_url in about_urls[:4]:
+            to_read = [(u, "booking") for u in booking_urls[:MAX_BOOKING_PAGES]] + \
+                      [(u, "about") for u in about_urls[:MAX_ABOUT_PAGES]]
+            for sub_url, kind in to_read:
                 try:
                     sub_resp = await client.get(sub_url)
                     if sub_resp.status_code == 200:
+                        intel["pages"].append({"url": sub_url, "html": sub_resp.text, "kind": kind})
                         sub_soup = BeautifulSoup(sub_resp.text, "html.parser")
                         sub_text = " ".join([p.get_text(strip=True) for p in sub_soup.find_all(["p", "li"]) if len(p.get_text(strip=True)) > 20])
                         intel["content_summary"] += f"\n[{sub_url}]: {sub_text[:1500]}"

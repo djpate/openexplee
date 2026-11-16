@@ -1,6 +1,6 @@
 import random
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from app.config import settings
 from app.engine.llm import call_llm_json
 
@@ -27,7 +27,8 @@ def default_draft_instructions() -> str:
         "- Give one concrete reason we're writing to them specifically: a single detail from their website, "
         "stated plainly. Don't recite their website back to them or flatter them, and don't guess at problems "
         "with their site or business; we haven't audited it.",
-        "- Say what we'd actually do for a business like theirs, in one or two plain sentences.",
+        "- Say what we'd actually do for them, in one or two plain sentences, based on the verified facts "
+        "about their website.",
         f"- {ask}",
         "- 60 to 90 words. Friendly, plain, peer-to-peer. No buzzwords, no hype, no exclamation marks.",
         '- Subject: 2 to 5 lowercase words specific to them. Never start it with "quick question".',
@@ -45,6 +46,7 @@ async def generate_cold_email(
     provider: Optional[str] = None,
     api_key: Optional[str] = None,
     instructions: Optional[str] = None,
+    site_facts: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     """Drafts a short cold email. `instructions` is a campaign's own writing guidance; blank
     means default_draft_instructions(). The facts, greeting, sign-off and output format are
@@ -58,6 +60,15 @@ async def generate_cold_email(
     sign_off = "\n".join(x for x in (sender_name, sender_company) if x) or "Best,"
     who = " from ".join(x for x in (sender_name, sender_company) if x) or "the sender (see below)"
     guidance = (instructions or "").strip() or default_draft_instructions()
+    facts = [f.strip() for f in (site_facts or []) if f and f.strip()]
+    if facts:
+        verified = ("What we verified on their website. Only offer what these facts support, and never say they "
+                    "lack something unless a fact below says so. Never tell them about something we didn't find or "
+                    "couldn't see: those facts only decide what we offer, because our check can miss things:\n"
+                    + "\n".join(f"- {f}" for f in facts))
+    else:
+        verified = ("Nothing about their website was verified, so keep what we offer general and don't claim "
+                    "anything about their site.")
 
     prompt = f"""Write a short cold email from {who} to a local business that has never heard of us.
 
@@ -68,6 +79,8 @@ About them (the recipient):
 - Business: {company_name} ({company_domain})
 - Contact: {contact_name if real_contact else "unknown"}{f", {job_title}" if real_contact and job_title else ""}
 - From their website: {company_summary or "(nothing available)"}
+
+{verified}
 
 How to write it:
 {guidance}
