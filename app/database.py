@@ -177,6 +177,7 @@ async def init_db():
             ("campaigns", "discovery_message", "TEXT"),
             ("leads", "phone", "TEXT"),
             ("leads", "company_id", "INTEGER"),
+            ("leads", "company_summary", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")

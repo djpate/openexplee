@@ -59,20 +59,19 @@ def test_no_contact_fallback():
 # ---------- fakes for the network and LLM ----------
 
 class Fakes:
-    """Stands in for the scraper, SMTP, people extraction, email guessing and the copywriter."""
+    """Stands in for the scraper, SMTP, people extraction and email guessing."""
 
     def __init__(self, monkeypatch, scrape_delay=0.0):
         self.sites = {}    # domain -> overrides for the scrape result
         self.smtp = {}     # email -> verification status (default "risky")
         self.people = {}   # domain -> extracted people
         self.guess = {}    # domain -> enrich_person_email result
-        self.scraped, self.verified, self.extracted, self.guessed, self.drafted = [], [], [], [], []
+        self.scraped, self.verified, self.extracted, self.guessed = [], [], [], []
         self.scrape_delay = scrape_delay
         monkeypatch.setattr(lead_builder, "scrape_company_website", self.scrape)
         monkeypatch.setattr(lead_builder, "verify_email_smtp", self.verify)
         monkeypatch.setattr(lead_builder, "_extract_people_with_llm", self.extract)
         monkeypatch.setattr(lead_builder, "enrich_person_email", self.enrich_person)
-        monkeypatch.setattr(lead_builder, "generate_cold_email", self.copy)
 
     async def scrape(self, url):
         domain = normalize_domain(url)
@@ -97,10 +96,6 @@ class Fakes:
         return self.guess.get(domain) or {"email": f"{first}.{last}@{domain}".lower(), "status": "invalid",
                                           "details": "No deliverable permutation found."}
 
-    async def copy(self, **kw):
-        self.drafted.append(kw)
-        return {"subject": f"hi {kw['company_name']}", "body": f"body for {kw['company_domain']}"}
-
 
 def row(domain="a.com", emails=(), phones=("+1 813 555 0100",), **kw):
     r = {"id": 7, "campaign_id": 1, "source": "overture", "source_id": "s1", "name": "A Dental",
@@ -123,7 +118,7 @@ async def test_unreachable_site_is_skipped(monkeypatch, error):
     f = Fakes(monkeypatch)
     f.sites["a.com"] = {"error": error, "found_emails": [], "content_summary": ""}
     assert await enrich_company(row(emails=["office@a.com"]), "vp") == {"skip_reason": "site_unreachable"}
-    assert f.verified == [] and f.extracted == [] and f.drafted == []
+    assert f.verified == [] and f.extracted == []
 
 
 @pytest.mark.parametrize("error", ["HTTP 401", "HTTP 403", "HTTP 429"])
@@ -136,18 +131,17 @@ async def test_bot_blocked_site_continues_with_overture_emails_only(monkeypatch,
     assert f.extracted == []
 
 
-async def test_bot_blocked_site_copy_uses_pool_category_and_place(monkeypatch):
+async def test_bot_blocked_site_summary_uses_pool_category_and_place(monkeypatch):
     f = Fakes(monkeypatch)
     f.sites["a.com"] = {"error": "HTTP 403", "found_emails": set(), "content_summary": ""}
-    await enrich_company(row(emails=["office@a.com"]), "vp")
-    assert f.drafted[0]["company_summary"] == "dentist, Tampa, FL"
+    lead = (await enrich_company(row(emails=["office@a.com"]), "vp"))["lead"]
+    assert lead["company_summary"] == "dentist, Tampa, FL"
 
 
 async def test_bot_blocked_site_without_overture_email_is_no_email(monkeypatch):
     f = Fakes(monkeypatch)
     f.sites["a.com"] = {"error": "HTTP 403", "found_emails": set(), "content_summary": ""}
     assert await enrich_company(row(), "vp") == {"skip_reason": "no_email"}
-    assert f.drafted == []
 
 
 async def test_found_emails_limited_to_own_domain_plus_overture(monkeypatch):
@@ -217,7 +211,6 @@ async def test_role_address_lead_still_greets_first_person(monkeypatch):
         ("info@a.com", "risky", "smtp says info@a.com")
     assert (lead["contact_name"], lead["first_name"], lead["last_name"], lead["job_title"]) == \
         ("Jo Smith", "Jo", "Smith", "Owner")
-    assert f.drafted[0]["contact_name"] == "Jo Smith"
 
 
 async def test_no_person_leaves_contact_empty(monkeypatch):
@@ -225,7 +218,6 @@ async def test_no_person_leaves_contact_empty(monkeypatch):
     lead = (await enrich_company(row(), "vp"))["lead"]
     assert (lead["contact_name"], lead["first_name"], lead["last_name"], lead["job_title"]) == (None, None, None, None)
     assert f.guessed == []
-    assert not f.drafted[0]["contact_name"]
 
 
 @pytest.mark.parametrize("first,last", [("Иван", "Петров"), ("Jo", "李"), ("Иван", "Smith"), ("Jo", "")])
@@ -244,7 +236,6 @@ async def test_guess_landing_on_generic_address_is_not_a_lead(monkeypatch):
     f.people["a.com"] = [JO]
     f.guess["a.com"] = {"email": "contact@a.com", "status": "deliverable", "details": "greylisted"}
     assert await enrich_company(row(), "vp") == {"skip_reason": "no_email"}
-    assert f.drafted == []
 
 
 async def test_deliverable_guess_loses_to_found_role_address(monkeypatch):
@@ -264,17 +255,11 @@ async def test_catch_all_guess_alone_is_not_a_lead(monkeypatch):
     assert await enrich_company(row(), "vp") == {"skip_reason": "no_email"}
 
 
-async def test_copy_drafted_only_for_leads(monkeypatch):
+async def test_discovery_leaves_leads_undrafted_with_a_summary(monkeypatch):
     f = Fakes(monkeypatch)
-    f.sites["a.com"] = {"found_emails": ["x@gmail.com"]}
-    assert await enrich_company(row(), "vp") == {"skip_reason": "no_email"}
-    assert f.drafted == []
-
     lead = (await enrich_company(row("b.com", name="B Dental"), "our value"))["lead"]
-    assert len(f.drafted) == 1
-    assert f.drafted[0]["value_proposition"] == "our value"
-    assert f.drafted[0]["company_name"] == "B Dental"
-    assert (lead["personalized_subject"], lead["personalized_body"]) == ("hi B Dental", "body for b.com")
+    assert (lead["personalized_subject"], lead["personalized_body"]) == (None, None)
+    assert lead["company_summary"] == "About b.com"
 
 
 async def test_lead_carries_pool_fields(monkeypatch):
@@ -419,7 +404,6 @@ async def test_domain_already_a_lead_in_own_campaign_links_existing_lead(db, mon
     assert {r["domain"]: (r["status"], r["skip_reason"], r["lead_id"]) for r in rows} == {
         "a.com": ("done", None, old_id), "b.com": ("done", None, out["lead_ids"][0])}
     assert f.scraped == ["b.com"]
-    assert [d["company_domain"] for d in f.drafted] == ["b.com"]
     leads = await _fetch("SELECT company_domain FROM leads WHERE campaign_id = ? ORDER BY id", cid)
     assert [r["company_domain"] for r in leads] == ["a.com", "b.com"]
 

@@ -108,7 +108,7 @@ def test_campaign_card_and_table_escape_name_and_icp():
 
 
 def test_leads_table_escapes_every_lead_field():
-    assert "leads.map(renderLeadRow)" in js_function("loadLeads")
+    assert "renderLeadRow(l, " in js_function("loadLeads")
     body = js_function("renderLeadRow")
     assert not re.search(r"\$\{l\.", body), "raw lead field interpolation"
     for field in ("company_name", "company_domain", "contact_name", "job_title", "email"):
@@ -154,3 +154,42 @@ def test_thread_item_renders_hostile_values_inert(tmp_path):
 
 def test_toast_escapes_message():
     assert "escapeHtml(message)" in js_function("showToast")
+
+
+# Lazy drafting: selection, bulk actions, campaign draft button.
+def test_leads_table_has_selection_and_bulk_actions():
+    for s in ('id="leads-select-all"', 'id="leads-bulk-bar"', "bulkDraftLeads(", "bulkDeleteLeads(",
+              "/api/leads/bulk-draft", "/api/leads/bulk-delete"):
+        assert s in HTML, s
+
+
+def test_lead_row_checkbox_reflects_selection_and_shows_undrafted(tmp_path):
+    on, off = run_js(tmp_path, ["escapeHtml", "safeHttpUrl", "renderLeadRow"], """[
+      renderLeadRow({id: 5, company_domain: 'a.com', status: 'enriched'}, true),
+      renderLeadRow({id: 6, company_domain: 'b.com', status: 'enriched'}, false)]""")
+    assert 'class="lead-select' in on and 'data-id="5"' in on and '" checked>' in on
+    assert 'data-id="6"' in off and '" checked>' not in off
+    assert "Not drafted yet" in off
+
+
+def test_campaign_draft_button_states(tmp_path):
+    idle, busy, none = run_js(tmp_path, ["escapeHtml", "renderDraftButton"], """[
+      renderDraftButton({id: 3, undrafted_count: 12, drafting_count: 0}),
+      renderDraftButton({id: 3, undrafted_count: 12, drafting_count: 4}),
+      renderDraftButton({id: 3, undrafted_count: 0, drafting_count: 0})]""")
+    assert "draftCampaignEmails(3, 12)" in idle and "Draft 12 emails" in idle
+    assert "Drafting 4" in busy and "draftCampaignEmails" not in busy
+    assert none == ""
+
+
+def test_auto_poll_keeps_refreshing_while_drafting():
+    assert "drafting_count" in js_function("startAutoPoll")
+
+
+def test_settings_page_lets_user_pick_both_claude_models():
+    assert 'id="settings-anthropic-model"' in HTML and 'id="settings-extraction-model"' in HTML
+    load, save = js_function("loadSettings"), js_function("handleSaveSettings")
+    for field, el in (("anthropic_model", "settings-anthropic-model"),
+                      ("anthropic_extraction_model", "settings-extraction-model")):
+        assert f"data.{field}" in load and el in load
+        assert f"{field}:" in save and el in save

@@ -41,7 +41,7 @@ async def _extract_people_with_llm(domain: str, text: str, job_titles: Optional[
             'Return ONLY a valid JSON array of objects: [{"first_name": "...", "last_name": "...", "job_title": "..."}]. '
             "Return [] if no real human names are present."
         )
-        parsed = await call_llm_json(prompt)
+        parsed = await call_llm_json(prompt, model=settings.anthropic_extraction_model)
         if isinstance(parsed, list):
             extracted = [p for p in parsed if isinstance(p, dict) and p.get("first_name") and p.get("last_name")]
             if extracted:

@@ -137,8 +137,8 @@ _ANTHROPIC_FALLBACK_MODELS = {
 }
 
 
-async def _call_anthropic(prompt: str, api_key: str) -> Optional[str]:
-    model = settings.anthropic_model
+async def _call_anthropic(prompt: str, api_key: str, model: Optional[str] = None) -> Optional[str]:
+    model = model or settings.anthropic_model
     extra: Dict[str, Any] = {}
     if model in _ANTHROPIC_FALLBACK_MODELS:
         # On a safety-classifier refusal, the API re-runs the request on a fallback model.
@@ -162,11 +162,14 @@ async def _call_anthropic(prompt: str, api_key: str) -> Optional[str]:
     return text or None
 
 
-async def call_llm_json(prompt: str, provider: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Any]:
+async def call_llm_json(
+    prompt: str, provider: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None
+) -> Optional[Any]:
     """
     Unified LLM JSON router supporting Claude Code subscription (`claude_cli`),
     Thor GPU Ollama (`thor_ollama`), local Ollama, Gemini, OpenAI, Anthropic, and Groq.
     Automatically falls back across available zero-cost providers if primary fails.
+    `model` overrides the Anthropic model for this call (e.g. a cheaper one for bulk extraction).
     """
     chosen = provider or settings.default_llm_provider
     attempts = [chosen]
@@ -198,7 +201,7 @@ async def call_llm_json(prompt: str, provider: Optional[str] = None, api_key: Op
                     "https://api.groq.com/openai", "llama-3.3-70b-versatile", prompt, api_key or settings.groq_api_key, json_mode=True
                 )
             elif prov == "anthropic" and (api_key or settings.anthropic_api_key):
-                raw_text = await _call_anthropic(prompt, api_key or settings.anthropic_api_key or "")
+                raw_text = await _call_anthropic(prompt, api_key or settings.anthropic_api_key or "", model)
 
             if raw_text:
                 return _extract_json_blob(raw_text)

@@ -7,7 +7,6 @@ from typing import Optional
 from app.config import settings
 from app.database import get_db_connection
 from app.engine.company_pool import refresh_pool_counters
-from app.engine.copywriter import generate_cold_email
 from app.engine.discovery import _extract_people_with_llm
 from app.engine.scraper import scrape_company_website
 from app.engine.verifier import enrich_person_email, verify_email_smtp
@@ -22,6 +21,7 @@ LEAD_COLUMNS = (
     "contact_name", "first_name", "last_name", "job_title",
     "email", "verification_status", "verification_reason",
     "personalized_subject", "personalized_body", "status", "phone", "company_id",
+    "company_summary",
 )
 
 
@@ -70,7 +70,7 @@ def _own_domain_emails(emails, domain: str) -> list[str]:
 
 
 async def enrich_company(company: dict, value_prop: str) -> dict:
-    """Scrape, find and check emails, and draft copy for one pool row.
+    """Scrape, find and check emails, and build the lead for one pool row (no email draft).
 
     Returns {"lead": {...}} or {"skip_reason": str}.
     """
@@ -114,11 +114,8 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
     company_name = company.get("name") or domain
     # A bot-blocked site gives no text; the pool row still says what and where the business is.
     place = (company.get("category"), company.get("city"), company.get("region"))
+    # Drafting happens later (mass action or at send time); keep what the draft will need.
     summary = text[:1000] or ", ".join(x for x in place if x)
-    draft = await generate_cold_email(
-        company_name=company_name, company_domain=domain, contact_name=contact_name or "",
-        job_title=job_title or "", company_summary=summary, value_proposition=value_prop,
-    )
     phones = _json_list(company.get("phones"))
     return {"lead": {
         "campaign_id": company.get("campaign_id"),
@@ -132,11 +129,12 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
         "email": email,
         "verification_status": status,
         "verification_reason": reasons.get((email, status), ""),
-        "personalized_subject": draft.get("subject"),
-        "personalized_body": draft.get("body"),
+        "personalized_subject": None,
+        "personalized_body": None,
         "status": "enriched",
         "phone": phones[0] if phones else None,
         "company_id": company.get("id"),
+        "company_summary": summary or None,
     }}
 
 
@@ -178,7 +176,8 @@ async def _gate(company: dict) -> Optional[dict]:
             "AND (campaign_id IS NULL OR campaign_id != ?) "
             "UNION ALL "
             "SELECT 1 FROM campaign_companies WHERE domain = ? AND campaign_id != ? "
-            "AND status IN ('pending', 'processing', 'done') AND id < ? LIMIT 1",
+            "AND ((status IN ('pending', 'processing', 'done') AND id < ?) OR skip_reason = 'deleted_by_user') "
+            "LIMIT 1",
             (domain, cid, domain, cid, company["id"]))
         return {"skip_reason": "in_other_campaign"} if await cur.fetchone() else None
     finally:

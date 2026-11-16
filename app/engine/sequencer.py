@@ -9,6 +9,7 @@ import httpx
 from typing import Dict, Any, Optional
 from app.database import get_db_connection
 from app.engine.copywriter import resolve_spintax
+from app.engine.drafting import draft_lead
 from app.config import settings
 
 
@@ -325,8 +326,21 @@ async def dispatch_campaign_batch(campaign_id: int, limit: int = 10) -> Dict[str
             errors.append("No active inboxes available with remaining daily quota.")
             break
 
-        subj = lead.get("personalized_subject") or f"quick question for {lead.get('company_name', 'you')}"
-        body = lead.get("personalized_body") or f"Hi,\n\nSaw what you are building and wanted to connect."
+        subj, body = lead.get("personalized_subject"), lead.get("personalized_body")
+        if not subj or not body:
+            # Drafts are made on demand; draft this one now rather than send generic text.
+            await draft_lead(lead["id"])
+            cur_conn = await get_db_connection()
+            try:
+                row = await (await cur_conn.execute(
+                    "SELECT personalized_subject, personalized_body FROM leads WHERE id = ?", (lead["id"],)
+                )).fetchone()
+            finally:
+                await cur_conn.close()
+            subj, body = (row["personalized_subject"], row["personalized_body"]) if row else (None, None)
+            if not subj or not body:
+                errors.append(f"Skipped {lead['email']}: couldn't draft an email for {lead.get('company_domain')}.")
+                continue
 
         send_res = await send_single_email(
             inbox=inbox,

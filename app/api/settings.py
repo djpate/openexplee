@@ -12,6 +12,8 @@ PERSISTED_FIELDS = (
     "gemini_api_key",
     "openai_api_key",
     "anthropic_api_key",
+    "anthropic_model",
+    "anthropic_extraction_model",
     "groq_api_key",
     "ollama_base_url",
     "thor_ollama_url",
@@ -34,6 +36,8 @@ class SettingsUpdate(BaseModel):
     gemini_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    anthropic_model: Optional[str] = None
+    anthropic_extraction_model: Optional[str] = None
     groq_api_key: Optional[str] = None
     ollama_base_url: Optional[str] = None
     thor_ollama_url: Optional[str] = None
@@ -80,6 +84,8 @@ async def get_settings():
     return {
         "default_llm_provider": settings.default_llm_provider,
         "default_llm_model": settings.default_llm_model,
+        "anthropic_model": settings.anthropic_model,
+        "anthropic_extraction_model": settings.anthropic_extraction_model,
         "gemini_api_key": mask_key(settings.gemini_api_key),
         "openai_api_key": mask_key(settings.openai_api_key),
         "anthropic_api_key": mask_key(settings.anthropic_api_key),
