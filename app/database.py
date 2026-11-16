@@ -184,6 +184,7 @@ async def init_db():
             ("leads", "fit_reason", "TEXT"),
             ("leads", "fit_override", "TEXT"),
             ("campaigns", "min_fit_score", "INTEGER DEFAULT 3"),
+            ("campaigns", "auto_send", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")

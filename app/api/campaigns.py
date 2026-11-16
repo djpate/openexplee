@@ -11,7 +11,10 @@ from app.engine.lead_builder import process_next_batch
 from app.engine.overture import OvertureError
 from app.engine.search_plan import PlanError
 from app.engine import sequencer as _sequencer
-from app.engine.sequencer import dispatch_campaign_batch, get_next_available_inbox, send_window_text
+from app.engine.sequencer import (
+    POSTAL_ADDRESS_MISSING, compliance_ready, dispatch_campaign_batch, get_next_available_inbox,
+    run_campaign_send, send_window_text,
+)
 from app.engine.analyzer import analyze_my_product
 from app.engine.copywriter import default_draft_instructions
 
@@ -287,6 +290,24 @@ async def trigger_campaign_discovery(campaign_id: int, background_tasks: Backgro
     return {"id": campaign_id, "status": "discovering"}
 
 
+class AutoSendUpdate(BaseModel):
+    enabled: bool
+
+
+@router.put("/{campaign_id}/auto-send")
+async def update_auto_send(campaign_id: int, req: AutoSendUpdate):
+    """When on, the scheduler sends this campaign on weekdays during sending hours, up to each inbox's limit."""
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("UPDATE campaigns SET auto_send = ? WHERE id = ?", (1 if req.enabled else 0, campaign_id))
+        await conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+    finally:
+        await conn.close()
+    return {"ok": True, "auto_send": req.enabled}
+
+
 class MinFitUpdate(BaseModel):
     min_fit_score: int = Field(ge=1, le=5)
 
@@ -364,25 +385,6 @@ async def refresh_campaign_search(campaign_id: int, background_tasks: Background
     return {"id": campaign_id, "status": "discovering"}
 
 
-async def _run_campaign_dispatch_background(campaign_id: int, limit: int = 20):
-    try:
-        await dispatch_campaign_batch(campaign_id, limit=limit)
-    except Exception as e:
-        print(f"[Sequencer Background Error]: {e}")
-    finally:
-        conn = await get_db_connection()
-        try:
-            cur = await conn.execute("SELECT COUNT(*) as tot, (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND status = 'sent') as snt FROM leads WHERE campaign_id = ?", (campaign_id, campaign_id))
-            r = await cur.fetchone()
-            tot = r["tot"] if r else 0
-            snt = r["snt"] if r else 0
-            new_status = "completed" if (tot > 0 and snt >= tot) else "ready"
-            await conn.execute("UPDATE campaigns SET status = ?, sent_count = ? WHERE id = ?", (new_status, snt, campaign_id))
-            await conn.commit()
-        finally:
-            await conn.close()
-
-
 @router.post("/{campaign_id}/launch")
 async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
     conn = await get_db_connection()
@@ -435,6 +437,9 @@ async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
             "message": "No leads in this campaign yet. Click 'Find Leads' first to discover prospects."
         }
 
+    if not compliance_ready():
+        return {"dispatched": 0, "status": "no_postal_address", "message": POSTAL_ADDRESS_MISSING}
+
     if not _sequencer.in_send_window():
         return {
             "dispatched": 0,
@@ -470,7 +475,7 @@ async def launch_campaign(campaign_id: int, background_tasks: BackgroundTasks):
     finally:
         await conn.close()
 
-    background_tasks.add_task(_run_campaign_dispatch_background, campaign_id, 20)
+    background_tasks.add_task(run_campaign_send, campaign_id, 20)
     return {
         "status": "sending",
         "message": (f"Sending up to {sendable} emails in the background, a few minutes apart. "
