@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     # Sender identity
     sender_name: str = ""  # sign-off name on AI-written emails
+    sender_company: str = ""  # your company, introduced in AI-written emails
     forward_to_email: str = ""  # your real inbox: Cloudflare catch-all forwarding + DMARC reports
     reply_cc_email: str = ""  # CC'd on replies sent from the Mailbox. Blank = no extra CC.
 

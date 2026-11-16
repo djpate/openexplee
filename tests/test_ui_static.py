@@ -212,3 +212,9 @@ def test_lead_row_opens_the_full_draft(tmp_path):
                  "renderLeadRow({id: 9, company_domain: 'a.com', status: 'enriched', "
                  "personalized_subject: 's', personalized_body: 'b'})")
     assert "openDraft(9)" in out
+
+
+def test_settings_page_has_sender_company():
+    assert 'id="settings-sender-company"' in HTML
+    assert "data.sender_company" in js_function("loadSettings")
+    assert "sender_company:" in js_function("handleSaveSettings")

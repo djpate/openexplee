@@ -21,6 +21,7 @@ PERSISTED_FIELDS = (
     "thor_cdp_url",
     "booking_url",
     "sender_name",
+    "sender_company",
     "forward_to_email",
     "reply_cc_email",
     "postal_address",
@@ -45,6 +46,7 @@ class SettingsUpdate(BaseModel):
     thor_cdp_url: Optional[str] = None
     booking_url: Optional[str] = None
     sender_name: Optional[str] = None
+    sender_company: Optional[str] = None
     forward_to_email: Optional[str] = None
     reply_cc_email: Optional[str] = None
     postal_address: Optional[str] = None
@@ -96,6 +98,7 @@ async def get_settings():
         "thor_cdp_url": settings.thor_cdp_url,
         "booking_url": settings.booking_url,
         "sender_name": settings.sender_name,
+        "sender_company": settings.sender_company,
         "forward_to_email": settings.forward_to_email,
         "reply_cc_email": settings.reply_cc_email,
         "postal_address": settings.postal_address,
