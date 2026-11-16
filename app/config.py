@@ -42,6 +42,18 @@ class Settings(BaseSettings):
 
     # Search & Enrichment
     serper_api_key: Optional[str] = None
+    serper_max_queries: int = 4
+
+    # Overture Maps company discovery
+    overture_release: str = ""  # blank = latest release
+    overture_min_confidence: float = 0.5
+    overture_max_places: int = 25000  # max places one search fetches (best-ranked kept)
+    discovery_batch_size: int = 50
+    discovery_concurrency: int = 8
+    default_search_area: str = "United States"
+    # Local parquet globs (tests/offline use). Blank = read from the Overture S3 bucket.
+    overture_places_source: str = ""
+    overture_divisions_source: str = ""
 
     # Sending & Deliverability Safeguards
     protected_primary_domains: str = ""  # your main domain(s), comma-separated; never send from these

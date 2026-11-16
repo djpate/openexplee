@@ -125,6 +125,38 @@ async def init_db():
         );
         """)
 
+        # Discovery pool: candidate companies per campaign
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS campaign_companies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+            source TEXT NOT NULL DEFAULT 'overture',
+            source_id TEXT,
+            name TEXT,
+            category TEXT,
+            domain TEXT NOT NULL,
+            website_url TEXT,
+            emails TEXT,
+            phones TEXT,
+            city TEXT,
+            region TEXT,
+            country TEXT,
+            lat REAL,
+            lon REAL,
+            tier INTEGER DEFAULT 1,
+            confidence REAL,
+            status TEXT DEFAULT 'pending',
+            skip_reason TEXT,
+            lead_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(campaign_id, domain)
+        );
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cc_campaign_status_tier ON campaign_companies(campaign_id, status, tier)"
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cc_domain ON campaign_companies(domain)")
+
         # Safe Schema Migrations for existing DBs
         for table, col, col_type in [
             ("campaigns", "reply_to_email", "TEXT"),
@@ -136,7 +168,15 @@ async def init_db():
             ("leads", "reply_intent", "TEXT"),
             ("leads", "auto_replies_sent", "INTEGER DEFAULT 0"),
             ("inboxes", "reply_to", "TEXT"),
-            ("inboxes", "cc_email", "TEXT")
+            ("inboxes", "cc_email", "TEXT"),
+            ("campaigns", "search_plan", "TEXT"),
+            ("campaigns", "overture_release", "TEXT"),
+            ("campaigns", "pool_total", "INTEGER DEFAULT 0"),
+            ("campaigns", "pool_pending", "INTEGER DEFAULT 0"),
+            ("campaigns", "batch_size", "INTEGER DEFAULT 50"),
+            ("campaigns", "discovery_message", "TEXT"),
+            ("leads", "phone", "TEXT"),
+            ("leads", "company_id", "INTEGER"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")
@@ -144,7 +184,11 @@ async def init_db():
                 pass
 
         # A discovery task dies with the server. On start, nothing can still be discovering.
-        await db.execute("UPDATE campaigns SET status = 'error' WHERE status = 'discovering'")
+        await db.execute(
+            "UPDATE campaigns SET status = 'error', "
+            "discovery_message = 'Interrupted by a restart. Click Find next leads to resume.' "
+            "WHERE status = 'discovering'")
+        await db.execute("UPDATE campaign_companies SET status = 'pending' WHERE status = 'processing'")
         await db.commit()
 
 

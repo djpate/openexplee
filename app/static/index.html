@@ -282,6 +282,11 @@
                 placeholder="e.g. Automated CI/CD test acceleration cutting build times by 60%"
                 class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
             </div>
+            <div>
+              <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Companies per run</label>
+              <input type="number" id="camp-batch" min="1" max="1000" placeholder="50"
+                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+            </div>
           </div>
 
           <button type="submit"
@@ -799,6 +804,7 @@
 
   <footer class="border-t border-slate-900 py-6 text-center text-xs text-slate-500">
     OpenExplee — Free & Open-Source AI Outbound Engine &middot; Released under the MIT License
+    <div class="mt-1">Business data: Overture Maps Foundation (CDLA-Permissive-2.0 / Apache-2.0 / CC0)</div>
   </footer>
 
   <!-- Application Logic -->
@@ -809,7 +815,7 @@
       const toast = document.getElementById('toast');
       toast.className = `fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl shadow-xl flex items-center space-x-3 border text-sm transition-all ${type === 'success' ? 'bg-emerald-950/90 text-emerald-300 border-emerald-800' : 'bg-rose-950/90 text-rose-300 border-rose-800'
         }`;
-      toast.innerHTML = `<span>${message}</span>`;
+      toast.innerHTML = `<span>${escapeHtml(message)}</span>`;
       toast.classList.remove('hidden');
       setTimeout(() => toast.classList.add('hidden'), 4000);
     }
@@ -866,6 +872,50 @@
       </span>`;
     }
 
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, ch => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    }
+
+    // Only http(s) links may go into an href; anything else renders as plain text.
+    function safeHttpUrl(u) {
+      const s = String(u ?? '').trim();
+      return /^https?:\/\//i.test(s) ? s : '';
+    }
+
+    function renderPlanBlock(c) {
+      const plan = c.search_plan;
+      const disp = c.display_status || c.status;
+      const discovering = disp === 'discovering' || c.status === 'discovering';
+      const busy = discovering || disp === 'sending' || c.status === 'sending';
+      // Shown on every card, plan or not: a failed first search has no plan yet.
+      const notes = `
+          ${c.discovery_message ? `<div class="text-amber-400 whitespace-pre-line">${escapeHtml(c.discovery_message)}</div>` : ''}
+          ${discovering ? `<div class="text-amber-400">Searching Overture&hellip; (large areas can take a few minutes)</div>` : ''}`;
+      if (!plan) {
+        return notes.trim() ? `<div class="text-xs text-slate-400 mt-2 space-y-0.5">${notes}</div>` : '';
+      }
+      const cats = (plan.categories || []).map(escapeHtml).join(', ');
+      const areas = (plan.areas || []).map(a => `${escapeHtml(a.name)} (tier ${escapeHtml(a.tier)})`).join(' &middot; ');
+      const done = c.pool_done || 0;
+      const skipped = c.pool_skipped || 0;
+      const pending = c.pool_pending || 0;
+      const found = c.pool_total || 0;
+      const processed = done + skipped;
+      const batch = c.batch_size || 50;
+      return `
+        <div class="text-xs text-slate-400 mt-2 space-y-0.5">
+          <div>Searching: <span class="text-slate-200">${cats}</span></div>
+          <div>In: <span class="text-slate-200">${areas}</span></div>
+          <div>${found} companies found &middot; ${processed} processed (${done} leads, ${skipped} skipped) &middot; ${pending} in reserve</div>
+          ${notes}
+          <div class="flex gap-2 pt-1">
+            <button onclick="discoverCampaign(${c.id})" ${busy ? 'disabled' : ''} class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition disabled:opacity-50">Find next ${batch} leads</button>
+            <button onclick="refreshSearch(${c.id})" ${busy ? 'disabled' : ''} class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-xs transition disabled:opacity-50">Refresh search</button>
+          </div>
+        </div>`;
+    }
+
     function renderActionButton(c, isTable = false) {
       const disp = c.display_status || c.status;
       const padding = isTable ? "px-3 py-1" : "px-3.5 py-1.5";
@@ -916,8 +966,8 @@
 
         tbody.innerHTML = camps.map(c => `
           <tr class="hover:bg-slate-900/40 transition">
-            <td class="py-3 px-4 font-semibold text-white">${c.name}</td>
-            <td class="py-3 px-4 text-slate-400 truncate max-w-xs">${c.icp_prompt}</td>
+            <td class="py-3 px-4 font-semibold text-white">${escapeHtml(c.name)}</td>
+            <td class="py-3 px-4 text-slate-400 truncate max-w-xs">${escapeHtml(c.icp_prompt)}</td>
             <td class="py-3 px-4">${renderStatusBadge(c)}</td>
             <td class="py-3 px-4">
               <span class="font-medium text-slate-200">${c.total_leads || 0}</span>
@@ -943,6 +993,8 @@
         target_industry: document.getElementById('camp-industry').value,
         value_proposition: document.getElementById('camp-value').value,
       };
+      const batch = parseInt(document.getElementById('camp-batch').value, 10);
+      if (batch >= 1 && batch <= 1000) payload.batch_size = batch;
 
       try {
         const res = await fetch('/api/campaigns', {
@@ -973,15 +1025,16 @@
         <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
           <div class="space-y-1">
             <div class="flex items-center gap-2">
-              <h4 class="font-bold text-white text-sm">${c.name}</h4>
+              <h4 class="font-bold text-white text-sm">${escapeHtml(c.name)}</h4>
               ${renderStatusBadge(c)}
             </div>
-            <p class="text-xs text-slate-400">${c.icp_prompt}</p>
+            <p class="text-xs text-slate-400">${escapeHtml(c.icp_prompt)}</p>
             <div class="flex items-center gap-3 text-xs text-slate-400 mt-2">
               <span>Leads Found: <b class="text-white">${c.total_leads || 0}</b></span> &middot;
               <span>Verified: <b class="text-sky-400">${c.verified_count || 0}</b></span> &middot;
               <span>Sent: <b class="text-emerald-400">${c.sent_count || 0}</b></span>
             </div>
+            ${renderPlanBlock(c)}
           </div>
           <div class="flex gap-2 items-center">
             ${renderActionButton(c, false)}
@@ -994,14 +1047,35 @@
       lucide.createIcons();
     }
 
-    async function discoverCampaign(id) {
-      showToast('Finding & verifying leads for this campaign in background...');
-      const res = await fetch(`/api/campaigns/${id}/discover`, { method: 'POST' });
-      if (res.ok) {
-        showToast('Lead discovery & verification in progress!');
-        loadDashboard();
-        loadCampaigns();
+    async function postCampaignAction(id, path, startMsg, okMsg) {
+      showToast(startMsg);
+      try {
+        const res = await fetch(`/api/campaigns/${id}/${path}`, { method: 'POST' });
+        if (!res.ok) {
+          let detail = `Request failed (${res.status})`;
+          try { detail = (await res.json()).detail || detail; } catch (e) { }
+          showToast(detail, 'error');
+          return;
+        }
+        showToast(okMsg);
+      } catch (err) {
+        showToast('Network error', 'error');
+        return;
       }
+      loadDashboard();
+      loadCampaigns();
+    }
+
+    function discoverCampaign(id) {
+      return postCampaignAction(id, 'discover',
+        'Finding & verifying leads for this campaign in background...',
+        'Lead discovery & verification in progress!');
+    }
+
+    function refreshSearch(id) {
+      return postCampaignAction(id, 'refresh-search',
+        'Refreshing the company search...',
+        'Company search refresh in progress!');
     }
 
     async function launchCampaign(id) {
@@ -1043,45 +1117,51 @@
         return;
       }
 
-      tbody.innerHTML = leads.map(l => {
-        let badge = 'bg-slate-800 text-slate-400';
-        if (l.verification_status === 'verified') badge = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-        if (l.verification_status === 'deliverable') badge = 'bg-emerald-500/10 text-emerald-300';
-        if (l.verification_status === 'catch_all' || l.verification_status === 'risky') badge = 'bg-amber-500/20 text-amber-300';
-        if (l.verification_status === 'invalid') badge = 'bg-rose-500/20 text-rose-300';
+      tbody.innerHTML = leads.map(renderLeadRow).join('');
+    }
 
-        return `
+    function renderLeadRow(l) {
+      let badge = 'bg-slate-800 text-slate-400';
+      if (l.verification_status === 'verified') badge = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+      if (l.verification_status === 'deliverable') badge = 'bg-emerald-500/10 text-emerald-300';
+      if (l.verification_status === 'catch_all' || l.verification_status === 'risky') badge = 'bg-amber-500/20 text-amber-300';
+      if (l.verification_status === 'invalid') badge = 'bg-rose-500/20 text-rose-300';
+      const site = safeHttpUrl(l.website_url);
+      const domain = escapeHtml(l.company_domain || '');
+      const statusClass = l.status === 'sent' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400';
+
+      return `
           <tr class="hover:bg-slate-900/40">
             <td class="py-3 px-4">
-              <div class="font-semibold text-white">${l.company_name}</div>
-              <a href="${l.website_url}" target="_blank" class="text-xs text-indigo-400 hover:underline">${l.company_domain}</a>
+              <div class="font-semibold text-white">${escapeHtml(l.company_name || '—')}</div>
+              ${site
+                ? `<a href="${escapeHtml(site)}" target="_blank" rel="noopener noreferrer" class="text-xs text-indigo-400 hover:underline">${domain}</a>`
+                : `<span class="text-xs text-slate-500">${domain}</span>`}
             </td>
             <td class="py-3 px-4">
-              <div class="font-medium text-slate-200">${l.contact_name}</div>
-              <div class="text-xs text-slate-500">${l.job_title}</div>
+              <div class="font-medium text-slate-200">${escapeHtml(l.contact_name || '—')}</div>
+              <div class="text-xs text-slate-500">${escapeHtml(l.job_title || '')}</div>
             </td>
             <td class="py-3 px-4">
-              <div class="text-xs font-mono">${l.email || '—'}</div>
+              <div class="text-xs font-mono">${escapeHtml(l.email || '—')}</div>
               <span class="inline-block px-2 py-0.5 mt-1 rounded text-[10px] font-bold uppercase ${badge}">
-                ${l.verification_status}
+                ${escapeHtml(l.verification_status)}
               </span>
             </td>
             <td class="py-3 px-4 max-w-xs">
-              <div class="text-xs font-semibold text-slate-200 truncate">${l.personalized_subject || 'No subject drafted'}</div>
-              <div class="text-[11px] text-slate-400 truncate mt-0.5">${l.personalized_body || '—'}</div>
+              <div class="text-xs font-semibold text-slate-200 truncate">${escapeHtml(l.personalized_subject || 'No subject drafted')}</div>
+              <div class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(l.personalized_body || '—')}</div>
             </td>
             <td class="py-3 px-4">
-              <span class="text-xs font-semibold uppercase px-2 py-0.5 rounded ${l.status === 'sent' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400'
-          }">${l.status}</span>
+              <span class="text-xs font-semibold uppercase px-2 py-0.5 rounded ${statusClass}">${escapeHtml(l.status)}</span>
             </td>
             <td class="py-3 px-4 text-right">
-              <button onclick="handleVerifySingleLead(${l.id}, '${l.email}')" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-200">
+              <button onclick="handleVerifySingleLead(${Number(l.id)}, ${escapeHtml(JSON.stringify(l.email || ''))})" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-200">
                 Verify
               </button>
             </td>
           </tr>
         `;
-      }).join('');
     }
 
     async function handleQuickVerify() {
@@ -1596,7 +1676,7 @@
         if (searchVal) {
           c.innerHTML = `
             <div class="py-12 text-center text-slate-400 text-xs space-y-2">
-              <p>No conversation threads matching "<strong class="text-white">${searchVal}</strong>".</p>
+              <p>No conversation threads matching "<strong class="text-white">${escapeHtml(searchVal)}</strong>".</p>
               <button onclick="clearMailboxSearch()" class="px-3 py-1 rounded-lg bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 border border-indigo-500/30 text-xs font-semibold transition">
                 Clear Search Filter
               </button>
@@ -1607,37 +1687,38 @@
         }
         return;
       }
-      c.innerHTML = threads.map(t => {
-        const initials = (t.contact_name || 'U').split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
-        const isSelected = t.id === selectedLeadId;
-        const timeStr = t.sent_at ? new Date(t.sent_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recent';
-        const isHot = t.is_hot_lead || t.status === 'replied';
+      c.innerHTML = threads.map(t => renderThreadItem(t, t.id === selectedLeadId)).join('');
+      lucide.createIcons();
+    }
 
-        return `
-          <div onclick="selectThread(${t.id})" 
+    function renderThreadItem(t, isSelected) {
+      const initials = (t.contact_name || 'U').split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
+      const timeStr = t.sent_at ? new Date(t.sent_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recent';
+      const isHot = t.is_hot_lead || t.status === 'replied';
+
+      return `
+          <div onclick="selectThread(${Number(t.id)})" 
             class="p-3 rounded-xl cursor-pointer transition flex items-start gap-3 border ${
               isSelected ? 'bg-indigo-950/40 border-indigo-500/50' : 'bg-slate-900/50 hover:bg-slate-800/60 border-slate-800/80'
             }">
             <div class="w-9 h-9 rounded-xl ${isHot ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-300 border border-slate-700'} flex items-center justify-center font-bold text-xs shrink-0">
-              ${initials}
+              ${escapeHtml(initials)}
             </div>
             <div class="flex-1 min-w-0">
               <div class="flex items-center justify-between gap-1">
-                <span class="text-xs font-bold text-white truncate">${t.contact_name}</span>
-                <span class="text-[10px] text-slate-500 shrink-0">${timeStr}</span>
+                <span class="text-xs font-bold text-white truncate">${escapeHtml(t.contact_name || '—')}</span>
+                <span class="text-[10px] text-slate-500 shrink-0">${escapeHtml(timeStr)}</span>
               </div>
-              <div class="text-[11px] text-slate-400 truncate">${t.job_title} &bull; <span class="text-indigo-400">${t.company_name}</span></div>
-              <div class="text-[11px] text-slate-500 truncate mt-1">${t.snippet || t.subject}</div>
+              <div class="text-[11px] text-slate-400 truncate">${escapeHtml(t.job_title || '—')} &bull; <span class="text-indigo-400">${escapeHtml(t.company_name || '')}</span></div>
+              <div class="text-[11px] text-slate-500 truncate mt-1">${escapeHtml(t.snippet || t.subject || '')}</div>
               <div class="flex items-center gap-1.5 mt-2">
                 ${isHot ? `<span class="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">🔥 Hot</span>` : ''}
-                <span class="px-1.5 py-0.2 rounded text-[10px] text-slate-400 bg-slate-800 border border-slate-700">${t.campaign_name || 'Campaign'}</span>
-                <span class="text-[10px] text-slate-500 ml-auto">&bull; Step ${t.followup_step || 1}</span>
+                <span class="px-1.5 py-0.2 rounded text-[10px] text-slate-400 bg-slate-800 border border-slate-700">${escapeHtml(t.campaign_name || 'Campaign')}</span>
+                <span class="text-[10px] text-slate-500 ml-auto">&bull; Step ${escapeHtml(t.followup_step || 1)}</span>
               </div>
             </div>
           </div>
         `;
-      }).join('');
-      lucide.createIcons();
     }
 
     async function selectThread(leadId) {
@@ -1684,8 +1765,8 @@
                   AI
                 </div>
                 <div>
-                  <span class="font-bold text-white">${activeThreadDetail.sender_name || 'You'}</span>
-                  ${lead.sent_from_inbox ? `<span class="text-slate-500 text-[11px]">&lt;${lead.sent_from_inbox}&gt;</span>` : ''}
+                  <span class="font-bold text-white">${escapeHtml(activeThreadDetail.sender_name || 'You')}</span>
+                  ${lead.sent_from_inbox ? `<span class="text-slate-500 text-[11px]">&lt;${escapeHtml(lead.sent_from_inbox)}&gt;</span>` : ''}
                 </div>
               </div>
               <div class="text-[11px] text-slate-500 flex items-center gap-1">
@@ -1694,10 +1775,10 @@
               </div>
             </div>
             <div class="text-xs font-semibold text-slate-200">
-              Subject: ${lead.personalized_subject || 'Outreach Pitch'}
+              Subject: ${escapeHtml(lead.personalized_subject || 'Outreach Pitch')}
             </div>
             <div class="text-xs text-slate-300 font-sans whitespace-pre-wrap leading-relaxed">
-${lead.personalized_body || 'No message body available.'}
+${escapeHtml(lead.personalized_body || 'No message body available.')}
             </div>
           </div>
 
@@ -1705,7 +1786,7 @@ ${lead.personalized_body || 'No message body available.'}
           <div class="flex items-center justify-center gap-2 text-[11px] text-slate-500 py-1">
             <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             <span>${activeThreadDetail.reply_cc_email
-              ? `Your replies are CC'd to <b>${activeThreadDetail.reply_cc_email}</b>`
+              ? `Your replies are CC'd to <b>${escapeHtml(activeThreadDetail.reply_cc_email)}</b>`
               : "Prospect replies go to the sending inbox's Reply-To address"}</span>
           </div>
         `;

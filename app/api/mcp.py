@@ -3,7 +3,7 @@ from fastapi import APIRouter, Request
 from typing import Dict, Any, List
 from app.database import get_db_connection
 from app.engine.discovery import (
-    discover_leads_for_icp,
+    search_companies_for_icp,
     search_companies_by_domains,
     search_people_by_domains,
 )
@@ -16,7 +16,7 @@ router = APIRouter(tags=["mcp"])
 MCP_TOOLS = [
     {
         "name": "search_companies",
-        "description": "Discover B2B companies from a natural-language ICP description via web search and live scraping ($0 cost).",
+        "description": "Find real companies matching a natural-language target from open business data (Overture Maps), plus web search for non-local businesses.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -114,7 +114,9 @@ MCP_TOOLS = [
 
 async def _execute_tool(name: str, args: Dict[str, Any]) -> Any:
     if name == "search_companies":
-        return await discover_leads_for_icp(args["definition"], max_companies=int(args.get("limit", 5)))
+        _, cands, _, _ = await search_companies_for_icp(args["definition"])
+        keys = ("name", "domain", "website_url", "category", "city", "region", "emails", "phones")
+        return [{k: c.get(k) for k in keys} for c in cands[: int(args.get("limit", 5))]]
     if name == "search_companies_by_domains":
         return await search_companies_by_domains(args["domains"])
     if name == "search_people_by_domains":

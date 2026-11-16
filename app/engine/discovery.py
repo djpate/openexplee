@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import httpx
 import json
 import re
@@ -7,6 +9,9 @@ from bs4 import BeautifulSoup
 from typing import List, Dict, Any, Optional, Set
 from app.config import settings
 from app.database import get_db_connection
+from app.engine import company_pool
+from app.engine.overture import fetch_places, get_release, load_categories, resolve_areas
+from app.engine.search_plan import PlanError, SearchPlan, build_search_plan, plan_from_json, plan_to_json
 from app.engine.scraper import scrape_company_website
 from app.engine.verifier import enrich_person_email
 
@@ -19,16 +24,9 @@ PERSON_TITLE_REGEX = re.compile(
 
 
 async def _get_suppressed_domains() -> Set[str]:
-    """Loads suppressed company domains from SQLite so they are never re-targeted."""
-    conn = await get_db_connection()
-    try:
-        cur = await conn.execute("SELECT LOWER(value) AS val FROM suppression_list WHERE entry_type = 'domain'")
-        rows = await cur.fetchall()
-        return {r["val"].lstrip("@") for r in rows}
-    except Exception:
-        return set()
-    finally:
-        await conn.close()
+    """Thin alias kept for existing call sites; logic lives in company_pool."""
+    from app.engine.company_pool import suppressed_domains
+    return await suppressed_domains()
 
 
 async def _extract_people_with_llm(domain: str, text: str, job_titles: Optional[List[str]] = None) -> List[Dict[str, str]]:
@@ -269,185 +267,131 @@ async def _search_queries_for_icp(icp_prompt: str) -> List[str]:
         "Each query names one kind of company or product, not people and not the word 'companies'. "
         'Return ONLY a JSON array of strings, for example ["ai code review tool startup"].'
     )
-    queries = [q.strip() for q in parsed if isinstance(q, str) and q.strip()][:4] if isinstance(parsed, list) else []
+    queries = [q.strip() for q in parsed if isinstance(q, str) and q.strip()][: settings.serper_max_queries] if isinstance(parsed, list) else []
     # No LLM answer: the first words of the ICP still beat the whole paragraph.
     return queries or [" ".join(icp_prompt.split()[:10])]
 
 
-# Vetted fallback domains categorized by common B2B ICP keywords
-ICP_CURATED_DOMAINS = {
-    "platform": [
-        {"title": "Modal Labs", "domain": "modal.com", "url": "https://modal.com"},
-        {"title": "Together AI", "domain": "together.ai", "url": "https://together.ai"},
-        {"title": "Baseten", "domain": "baseten.co", "url": "https://baseten.co"},
-        {"title": "Anyscale", "domain": "anyscale.com", "url": "https://anyscale.com"},
-        {"title": "Fireworks AI", "domain": "fireworks.ai", "url": "https://fireworks.ai"},
-        {"title": "RunPod", "domain": "runpod.io", "url": "https://runpod.io"},
-        {"title": "Predibase", "domain": "predibase.com", "url": "https://predibase.com"},
-        {"title": "OctoAI", "domain": "octoai.cloud", "url": "https://octoai.cloud"},
-    ],
-    "agent": [
-        {"title": "Cognition AI", "domain": "cognition.ai", "url": "https://cognition.ai"},
-        {"title": "Factory AI", "domain": "factory.ai", "url": "https://factory.ai"},
-        {"title": "Magic AI", "domain": "magic.dev", "url": "https://magic.dev"},
-        {"title": "Poolside AI", "domain": "poolside.ai", "url": "https://poolside.ai"},
-        {"title": "Cursor", "domain": "cursor.com", "url": "https://cursor.com"},
-        {"title": "Augment Code", "domain": "augmentcode.com", "url": "https://augmentcode.com"},
-        {"title": "Sweep AI", "domain": "sweep.dev", "url": "https://sweep.dev"},
-        {"title": "Decagon", "domain": "decagon.ai", "url": "https://decagon.ai"},
-    ],
-    "risk": [
-        {"title": "Robust Intelligence", "domain": "robustintelligence.com", "url": "https://robustintelligence.com"},
-        {"title": "Credo AI", "domain": "credo.ai", "url": "https://credo.ai"},
-        {"title": "Fiddler AI", "domain": "fiddler.ai", "url": "https://fiddler.ai"},
-        {"title": "Arthur AI", "domain": "arthur.ai", "url": "https://arthur.ai"},
-        {"title": "Lakera AI", "domain": "lakera.ai", "url": "https://lakera.ai"},
-        {"title": "Protect AI", "domain": "protectai.com", "url": "https://protectai.com"},
-        {"title": "CalypsoAI", "domain": "calypsoai.com", "url": "https://calypsoai.com"},
-    ],
-    "engineering": [
-        {"title": "LangChain", "domain": "langchain.com", "url": "https://langchain.com"},
-        {"title": "LlamaIndex", "domain": "llamaindex.ai", "url": "https://llamaindex.ai"},
-        {"title": "Weights & Biases", "domain": "wandb.ai", "url": "https://wandb.ai"},
-        {"title": "Pinecone", "domain": "pinecone.io", "url": "https://pinecone.io"},
-        {"title": "Deepgram", "domain": "deepgram.com", "url": "https://deepgram.com"},
-        {"title": "AssemblyAI", "domain": "assemblyai.com", "url": "https://assemblyai.com"},
-        {"title": "Replicate", "domain": "replicate.com", "url": "https://replicate.com"},
-        {"title": "Cohere", "domain": "cohere.com", "url": "https://cohere.com"},
-    ],
-    "internship": [
-        {"title": "Statsig", "domain": "statsig.com", "url": "https://statsig.com"},
-        {"title": "Modal Labs", "domain": "modal.com", "url": "https://modal.com"},
-        {"title": "Baseten", "domain": "baseten.co", "url": "https://baseten.co"},
-        {"title": "Hex Technologies", "domain": "hex.tech", "url": "https://hex.tech"},
-        {"title": "Replit", "domain": "replit.com", "url": "https://replit.com"},
-        {"title": "Pinecone", "domain": "pinecone.io", "url": "https://pinecone.io"},
-        {"title": "LangChain", "domain": "langchain.com", "url": "https://langchain.com"},
-        {"title": "Together AI", "domain": "together.ai", "url": "https://together.ai"},
-    ]
-}
+NO_SERPER_MESSAGE = (
+    "This target isn't a local business type. Open map data covers it poorly. "
+    "Add a Serper key in Settings for web search results."
+)
 
 
-async def _suggest_domains_via_llm(icp_prompt: str, count: int = 8) -> List[Dict[str, str]]:
-    """Identifies real active company domains matching the ICP using LLM intelligence."""
-    from app.engine.llm import call_llm_json
-
-    prompt = (
-        f"You are a sales intelligence engine. Given this Ideal Customer Profile:\n'{icp_prompt}'\n\n"
-        f"Name {count} real, active companies or startups (no aggregators, no job boards) matching this profile.\n"
-        'Return ONLY a valid JSON array of objects with their exact company name and their website domain (ending in .com, .ai, .io, .co):\n'
-        '[{"company_name": "Modal Labs", "website_domain": "modal.com"}, {"company_name": "Together AI", "website_domain": "together.ai"}]'
-    )
-    clean = []
-    try:
-        parsed = await call_llm_json(prompt)
-        if isinstance(parsed, list):
-            for item in parsed:
-                if isinstance(item, dict):
-                    raw_domain = item.get("website_domain") or item.get("domain") or ""
-                    d = raw_domain.lower().replace("https://", "").replace("http://", "").replace("www.", "").strip("/ ")
-                    # clean any spaces or invalid chars
-                    d = re.sub(r"\s+", "", d)
-                    if "." in d and any(d.endswith(ext) for ext in (".com", ".ai", ".io", ".co", ".tech", ".dev", ".net", ".org")):
-                        name = item.get("company_name") or d
-                        clean.append({"title": name, "domain": d, "url": f"https://{d}"})
-    except Exception as e:
-        print(f"[Discovery] LLM domain extraction note: {e}")
-
-    # Fallback to curated startup domains if LLM returned fewer than 3
-    if len(clean) < 3:
-        prompt_lower = icp_prompt.lower()
-        for key, presets in ICP_CURATED_DOMAINS.items():
-            if key in prompt_lower:
-                for p in presets:
-                    if not any(c["domain"] == p["domain"] for c in clean):
-                        clean.append(p)
-                break
-        if len(clean) < 3:
-            # Default to engineering/platform presets
-            for p in ICP_CURATED_DOMAINS["platform"]:
-                if not any(c["domain"] == p["domain"] for c in clean):
-                    clean.append(p)
-
-    return clean[:count]
+async def search_web_candidates(icp_prompt: str) -> List[Dict[str, Any]]:
+    """Serper results in the fetch_places shape. Empty when no Serper key is set."""
+    if not settings.serper_api_key:
+        return []
+    out = []
+    seen: Set[str] = set()
+    for query in (await _search_queries_for_icp(icp_prompt))[: settings.serper_max_queries]:
+        for r in await search_serper(query, settings.serper_api_key):
+            domain = (r.get("domain") or "").lower()
+            if not domain or any(skip in domain for skip in NON_COMPANY_HOSTS):
+                continue
+            # One hit per site: repeated hits on one domain are not a chain (keep the first).
+            key = company_pool.normalize_domain(r.get("url")) or domain
+            if key in seen:
+                continue
+            seen.add(key)
+            title = (r.get("title") or "").split(" - ")[0].split("|")[0].strip()
+            out.append({
+                "source_id": r["url"], "name": title or domain,
+                "category": "", "website_url": r["url"], "emails": [], "phones": [], "brand": None,
+                "confidence": 0.5, "city": "", "region": "", "country": "", "lat": None, "lon": None, "tier": 1,
+            })
+    return out
 
 
-async def discover_leads_for_icp(icp_prompt: str, max_companies: int = 10) -> List[Dict[str, Any]]:
-    """
-    Takes a natural-language ICP (e.g. 'B2B SaaS companies in California using Stripe')
-    and discovers target companies, decision-makers, and verified emails.
-    """
-    suppressed_domains = await _get_suppressed_domains()
-
-    # 1. Gather candidate domains from AI domain intelligence and web search
-    raw_results = []
-    llm_domains = await _suggest_domains_via_llm(icp_prompt, count=max_companies)
-    raw_results.extend(llm_domains)
-
-    # 2. Execute Web Search across search engines to discover additional organic hits
-    for search_query in await _search_queries_for_icp(icp_prompt):
-        found = []
+async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan], on_plan=None):
+    """Returns plan, overture places, web places, messages, release (uncleaned).
+    on_plan(plan, messages) is awaited once the plan is built, validated and its areas
+    resolved, before the (slow) place fetch and web search."""
+    release = await asyncio.to_thread(get_release)
+    if plan is None:
+        cats = await asyncio.to_thread(load_categories, release)
+        plan = await build_search_plan(icp_prompt, cats)
+    messages = list(plan.messages)
+    places: List[Dict[str, Any]] = []
+    web: List[Dict[str, Any]] = []
+    areas = []
+    if plan.categories:
+        notes: List[str] = []
+        areas, _ = await asyncio.to_thread(resolve_areas, plan.areas, release, notes)
+        messages += notes
+        if plan.areas and not areas:
+            raise PlanError("None of the places in the target could be used. " + " ".join(notes))
+    if on_plan is not None:
+        await on_plan(plan, messages)
+    if plan.categories:
+        places = await asyncio.to_thread(
+            fetch_places, release, plan.categories, areas, settings.overture_min_confidence, None, messages
+        )
+    if not plan.is_local_business:
         if settings.serper_api_key:
-            found = await search_serper(search_query, settings.serper_api_key, max_companies * 2)
-        if not found:
-            found = await search_bing(search_query, max_companies * 2)
-        if not found:
-            found = await search_duckduckgo(search_query, max_companies * 2)
-        raw_results.extend(found)
-
-    # 3. Filter, Deduplicate & Enforce Suppression List
-    seen_domains = set()
-    candidate_sites = []
-    for r in raw_results:
-        d = r.get("domain", "").lower()
-        if (
-            d
-            and d not in seen_domains
-            and d not in suppressed_domains
-            and not any(skip in d for skip in NON_COMPANY_HOSTS)
-        ):
-            seen_domains.add(d)
-            candidate_sites.append(r)
-        if len(candidate_sites) >= max_companies:
-            break
-
-    # 4. Deep Crawl Each Site & Extract Decision-Makers
-    discovered_leads = []
-    for site in candidate_sites:
-        intel = await scrape_company_website(site["url"])
-        domain = intel["domain"]
-        # Sites carry placeholder and third-party addresses (you@yourcompany.com). Keep the company's own.
-        intel["found_emails"] = [e for e in intel.get("found_emails", []) if e.endswith("@" + domain) or e.endswith("." + domain)]
-        company_name = site.get("title", "").split("-")[0].split("|")[0].strip() or domain
-
-        people = await _extract_people_with_llm(domain, intel.get("content_summary", ""))
-        if people:
-            p = people[0]
-            contact_name = f"{p['first_name']} {p['last_name']}"
-            job_title = p.get("job_title", "Decision Maker")
-            enriched = await enrich_person_email(p["first_name"], p["last_name"], domain)
-            email_candidate = enriched.get("email") or (intel["found_emails"][0] if intel.get("found_emails") else f"hello@{domain}")
-        elif intel.get("found_emails"):
-            contact_name = "Founder / Growth Lead"
-            job_title = "Decision Maker"
-            email_candidate = intel["found_emails"][0]
+            web = await search_web_candidates(icp_prompt)
         else:
-            # Fall back to role-based address at the verified domain
-            contact_name = f"Founder / Hiring Lead"
-            job_title = "Decision Maker"
-            email_candidate = f"contact@{domain}"
+            messages.append(NO_SERPER_MESSAGE)
+    return plan, places, web, messages, release
 
-        discovered_leads.append({
-            "company_name": company_name,
-            "company_domain": domain,
-            "website_url": intel["url"],
-            "contact_name": contact_name,
-            "job_title": job_title,
-            "email": email_candidate,
-            "found_emails": intel.get("found_emails", []),
-            "summary": intel.get("content_summary", "")[:1000],
-            "description": intel.get("description", ""),
-        })
 
-    return discovered_leads
+async def search_companies_for_icp(icp_prompt: str, plan: Optional[SearchPlan] = None):
+    """Returns (plan, cleaned candidates, user-facing messages, release)."""
+    plan, places, web, messages, release = await _search_parts(icp_prompt, plan)
+    suppressed = await company_pool.suppressed_domains()
+    cands = company_pool.clean_candidates(places + web, set(), suppressed)
+    return plan, cands, messages, release
 
+
+async def _save_search_state(campaign_id: int, plan: SearchPlan, messages: List[str],
+                             release: Optional[str] = None) -> None:
+    """Store the plan and messages; the release only once a fetch has completed, so a
+    plan without a release means the search never finished (run_discovery_task resumes it)."""
+    sets, params = "search_plan = ?, discovery_message = ?", [plan_to_json(plan), "\n".join(messages) or None]
+    if release:
+        sets += ", overture_release = ?"
+        params.append(release)
+    conn = await get_db_connection()
+    try:
+        await conn.execute(f"UPDATE campaigns SET {sets} WHERE id = ?", (*params, campaign_id))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def refresh_campaign_pool(campaign_id: int) -> Dict[str, Any]:
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("SELECT icp_prompt, search_plan FROM campaigns WHERE id = ?", (campaign_id,))
+        row = await cur.fetchone()
+    finally:
+        await conn.close()
+    if not row:
+        raise ValueError(f"campaign {campaign_id} not found")
+    plan = plan_from_json(row["search_plan"]) if row["search_plan"] else None
+    # Store the plan before the fetch: the card shows it during a long first search,
+    # and a retry after a fetch failure reuses it.
+    plan, places, web, messages, release = await _search_parts(
+        row["icp_prompt"], plan, functools.partial(_save_search_state, campaign_id))
+    suppressed = await company_pool.suppressed_domains()
+    held = await company_pool.held_domains(campaign_id)
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("SELECT company_domain FROM leads WHERE campaign_id = ?", (campaign_id,))
+        own = {company_pool.normalize_domain(r["company_domain"]) for r in await cur.fetchall()}
+    finally:
+        await conn.close()
+    held = held | (own - {""})
+    inserted = 0
+    for source, found in (("overture", places), ("serper", web)):
+        if found:
+            cleaned = company_pool.clean_candidates(found, held, suppressed)
+            inserted += await company_pool.save_pool(campaign_id, cleaned, source)
+    await _save_search_state(campaign_id, plan, messages, release)
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("SELECT pool_total FROM campaigns WHERE id = ?", (campaign_id,))
+        total = (await cur.fetchone())["pool_total"]
+    finally:
+        await conn.close()
+    return {"inserted": inserted, "pool_total": total, "messages": messages}

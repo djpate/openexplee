@@ -1,0 +1,281 @@
+import pytest
+
+from app.config import settings
+from app.database import get_db_connection
+from app.engine import discovery
+from app.engine.discovery import refresh_campaign_pool, search_companies_for_icp, search_web_candidates
+from app.engine.overture import AreaSpec, OvertureError
+from app.engine.search_plan import PlanError, SearchPlan, plan_from_json
+from tests.overture_fixtures import division, overture_files, place  # noqa: F401
+
+
+def local_plan(areas=None):
+    return SearchPlan(["dental_clinic"], areas or [AreaSpec("Tampa", "locality", 1, "US-FL", "US")], True, [])
+
+
+@pytest.fixture
+def world(overture_files, monkeypatch):
+    write_places, write_divisions = overture_files
+    calls = {"plan": 0, "serper": [], "bing": [], "ddg": []}
+    state = {"plan": local_plan()}
+
+    def set_places(*rows):
+        write_places(settings.overture_places_source, list(rows))
+
+    set_places(place())
+    write_divisions(settings.overture_divisions_source, [division()])
+
+    async def fake_plan(icp, cats):
+        calls["plan"] += 1
+        return state["plan"]
+
+    async def fake_serper(q, key, max_results=15):
+        calls["serper"].append(q)
+        return [{"title": "Acme - Home", "url": "https://acme.io", "domain": "acme.io", "snippet": ""},
+                {"title": "Acme", "url": "https://linkedin.com/company/acme", "domain": "linkedin.com", "snippet": ""}]
+
+    async def fake_queries(icp):
+        return ["q1", "q2", "q3"]
+
+    async def fake_bing(q, max_results=10):
+        calls["bing"].append(q)
+        return []
+
+    monkeypatch.setattr(discovery, "build_search_plan", fake_plan)
+    monkeypatch.setattr(discovery, "search_serper", fake_serper)
+    monkeypatch.setattr(discovery, "_search_queries_for_icp", fake_queries)
+    monkeypatch.setattr(discovery, "search_bing", fake_bing)
+    monkeypatch.setattr(discovery, "search_duckduckgo", fake_bing)
+    monkeypatch.setattr(settings, "serper_api_key", "")
+    monkeypatch.setattr(settings, "serper_max_queries", 2)
+    return calls, state, set_places
+
+
+async def test_local_icp_uses_overture_only(world):
+    calls, _, _ = world
+    plan, cands, msgs, rel = await search_companies_for_icp("dentists in Tampa, FL")
+    assert [c["domain"] for c in cands] == ["tampadental.com"] and rel == "local"
+    assert calls["serper"] == calls["bing"] == []
+
+
+async def test_non_local_without_serper_key_warns(world):
+    calls, state, _ = world
+    state["plan"] = SearchPlan([], [], False, [])
+    _, cands, msgs, _ = await search_companies_for_icp("saas")
+    assert "Open map data covers it poorly" in " ".join(msgs) and cands == [] and calls["bing"] == []
+
+
+async def test_non_local_with_serper_key_adds_web_candidates(world, monkeypatch):
+    calls, state, _ = world
+    monkeypatch.setattr(settings, "serper_api_key", "k")
+    state["plan"] = SearchPlan([], [], False, [])
+    _, cands, msgs, _ = await search_companies_for_icp("saas")
+    assert [c["domain"] for c in cands] == ["acme.io"] and cands[0]["confidence"] == 0.5
+    assert len(calls["serper"]) == 2 and calls["bing"] == []
+    assert not any("map data" in m for m in msgs)
+
+
+async def test_non_local_with_categories_still_runs_overture_no_key(world):
+    calls, state, _ = world
+    state["plan"] = SearchPlan(["dental_clinic"], [AreaSpec("Tampa", "locality", 1, "US-FL", "US")], False, [])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert [c["domain"] for c in cands] == ["tampadental.com"]
+    assert "Open map data covers it poorly" in " ".join(msgs) and calls["bing"] == []
+
+
+async def test_non_local_with_categories_and_key_returns_both(world, monkeypatch):
+    calls, state, _ = world
+    monkeypatch.setattr(settings, "serper_api_key", "k")
+    state["plan"] = SearchPlan(["dental_clinic"], [AreaSpec("Tampa", "locality", 1, "US-FL", "US")], False, [])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert {c["domain"] for c in cands} == {"tampadental.com", "acme.io"} and calls["bing"] == []
+    assert not any("map data" in m for m in msgs)
+
+
+async def test_search_web_candidates_without_key_is_empty(world):
+    assert await search_web_candidates("x") == []
+
+
+async def _campaign():
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("INSERT INTO campaigns (name, icp_prompt) VALUES ('c', 'dentists in Tampa')")
+        await conn.commit()
+        return cur.lastrowid
+    finally:
+        await conn.close()
+
+
+async def test_refresh_reuses_stored_plan_and_only_adds_new(db, world):
+    calls, _, set_places = world
+    cid = await _campaign()
+    r1 = await refresh_campaign_pool(cid)
+    assert r1["inserted"] == 1 and r1["pool_total"] == 1
+    set_places(place(), place(id="p2", websites=["https://newdental.com"], names={"primary": "New"}))
+    r2 = await refresh_campaign_pool(cid)
+    assert calls["plan"] == 1 and r2["inserted"] == 1 and r2["pool_total"] == 2
+    conn = await get_db_connection()
+    try:
+        n = (await (await conn.execute("SELECT count(*) c FROM leads")).fetchone())["c"]
+        row = await (await conn.execute("SELECT overture_release, search_plan FROM campaigns WHERE id=?", (cid,))).fetchone()
+    finally:
+        await conn.close()
+    assert n == 0 and row["overture_release"] == "local" and row["search_plan"]
+
+
+async def test_refresh_skips_domains_held_by_other_campaigns(db, world):
+    other = await _campaign()
+    await refresh_campaign_pool(other)
+    conn = await get_db_connection()
+    try:
+        await conn.execute("UPDATE campaign_companies SET status='done' WHERE campaign_id=?", (other,))
+        await conn.commit()
+    finally:
+        await conn.close()
+    cid = await _campaign()
+    r = await refresh_campaign_pool(cid)
+    assert r["inserted"] == 0
+
+
+async def test_unresolved_areas_reported_and_all_unresolved_raises(world):
+    _, state, _ = world
+    state["plan"] = local_plan([AreaSpec("Tampa", "locality", 1, "US-FL", "US"),
+                                AreaSpec("Nowhereville", "locality", 2, "US-FL", "US")])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert cands and any("Nowhereville" in m for m in msgs)
+    state["plan"] = local_plan([AreaSpec("Nowhereville", "locality", 1, "US-FL", "US")])
+    with pytest.raises(PlanError, match="None of the places"):
+        await search_companies_for_icp("x")
+
+
+def test_llm_recall_is_gone():
+    assert not hasattr(discovery, "_suggest_domains_via_llm") and not hasattr(discovery, "ICP_CURATED_DOMAINS")
+
+
+async def test_refresh_excludes_own_existing_lead_domains(db, world):
+    cid = await _campaign()
+    conn = await get_db_connection()
+    try:
+        await conn.execute(
+            "INSERT INTO leads (campaign_id, company_name, company_domain) VALUES (?, 'T', 'WWW.tampadental.com')", (cid,))
+        await conn.commit()
+    finally:
+        await conn.close()
+    r = await refresh_campaign_pool(cid)
+    assert r["inserted"] == 0 and r["pool_total"] == 0
+
+
+def test_old_inline_discovery_is_gone():
+    assert not hasattr(discovery, "discover_leads_for_icp")
+
+
+async def test_ambiguous_area_message_reaches_search_messages_and_plan_error(world, overture_files):
+    _, state, _ = world
+    _, write_divisions = overture_files
+    write_divisions(settings.overture_divisions_source, [
+        division(),
+        division(id="p1", name="Portland", region="US-OR", box=(-123.0, 45.4, -122.4, 45.7)),
+        division(id="p2", name="Portland", region="US-ME", box=(-70.4, 43.6, -70.2, 43.7)),
+    ])
+    state["plan"] = local_plan([AreaSpec("Tampa", "locality", 1, "US-FL", "US"), AreaSpec("Portland", "locality", 2)])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert cands and "Portland is ambiguous (US-ME, US-OR). Add the state." in msgs
+    assert not any("Couldn't find" in m for m in msgs)
+    state["plan"] = local_plan([AreaSpec("Portland", "locality", 1)])
+    with pytest.raises(PlanError, match="None of the places") as e:
+        await search_companies_for_icp("x")
+    assert "Portland is ambiguous" in str(e.value)
+
+
+async def test_cap_message_reaches_search_messages_and_campaign(db, world, monkeypatch):
+    _, _, set_places = world
+    set_places(place(), place(id="p2", websites=["https://newdental.com"], confidence=0.95))
+    monkeypatch.setattr(settings, "overture_max_places", 1)
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert [c["domain"] for c in cands] == ["newdental.com"]
+    assert any(m.startswith("More than 1 businesses matched. Kept the 1 best-ranked.") for m in msgs)
+    cid = await _campaign()
+    await refresh_campaign_pool(cid)
+    conn = await get_db_connection()
+    try:
+        row = await (await conn.execute("SELECT discovery_message FROM campaigns WHERE id=?", (cid,))).fetchone()
+    finally:
+        await conn.close()
+    assert "More than 1 businesses matched" in row["discovery_message"]
+
+
+async def _campaign_row(cid):
+    conn = await get_db_connection()
+    try:
+        return await (await conn.execute("SELECT * FROM campaigns WHERE id=?", (cid,))).fetchone()
+    finally:
+        await conn.close()
+
+
+async def test_plan_stored_before_fetch_and_reused_after_fetch_failure(db, world, monkeypatch):
+    calls, state, _ = world
+    real_fetch = discovery.fetch_places
+
+    def failing_fetch(*a, **k):
+        raise OvertureError("HTTP 503 from s3")
+
+    monkeypatch.setattr(discovery, "fetch_places", failing_fetch)
+    cid = await _campaign()
+    with pytest.raises(OvertureError):
+        await refresh_campaign_pool(cid)
+    row = await _campaign_row(cid)
+    assert plan_from_json(row["search_plan"]) == state["plan"]
+    assert row["overture_release"] is None  # set only once a fetch completes
+
+    monkeypatch.setattr(discovery, "fetch_places", real_fetch)
+    r = await refresh_campaign_pool(cid)
+    assert calls["plan"] == 1 and r["inserted"] == 1
+    assert (await _campaign_row(cid))["overture_release"] == "local"
+
+
+async def test_first_fetch_sees_plan_already_stored(db, world, monkeypatch):
+    real_fetch = discovery.fetch_places
+    seen = {}
+    cid = await _campaign()
+
+    def watching_fetch(*a, **k):
+        import sqlite3
+        c = sqlite3.connect(str(db))
+        seen["plan"] = c.execute("SELECT search_plan FROM campaigns WHERE id=?", (cid,)).fetchone()[0]
+        c.close()
+        return real_fetch(*a, **k)
+
+    monkeypatch.setattr(discovery, "fetch_places", watching_fetch)
+    await refresh_campaign_pool(cid)
+    assert seen["plan"] and plan_from_json(seen["plan"]).categories == ["dental_clinic"]
+
+
+async def test_plan_error_stores_no_plan(db, world):
+    _, state, _ = world
+    state["plan"] = local_plan([AreaSpec("Nowhereville", "locality", 1, "US-FL", "US")])
+    cid = await _campaign()
+    with pytest.raises(PlanError):
+        await refresh_campaign_pool(cid)
+    assert (await _campaign_row(cid))["search_plan"] is None
+
+
+async def test_refresh_keeps_one_serper_candidate_for_repeated_domain(db, world, monkeypatch):
+    _, state, _ = world
+    monkeypatch.setattr(settings, "serper_api_key", "k")
+    state["plan"] = SearchPlan([], [], False, [])
+
+    async def same_site(q, key, max_results=15):
+        return [{"title": f"Acme {i}", "url": f"https://www.acme.io/page{i}", "domain": "acme.io", "snippet": ""}
+                for i in range(5)]
+
+    monkeypatch.setattr(discovery, "search_serper", same_site)
+    cid = await _campaign()
+    r = await refresh_campaign_pool(cid)
+    assert r["inserted"] == 1
+    conn = await get_db_connection()
+    try:
+        rows = await (await conn.execute(
+            "SELECT source, domain, website_url FROM campaign_companies WHERE campaign_id=?", (cid,))).fetchall()
+    finally:
+        await conn.close()
+    assert [tuple(x) for x in rows] == [("serper", "acme.io", "https://www.acme.io/page0")]
