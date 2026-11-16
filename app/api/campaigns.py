@@ -218,29 +218,35 @@ async def get_campaign(campaign_id: int):
     return result
 
 
-async def _require_idle_campaign(campaign_id: int):
+async def _claim_discovery(campaign_id: int):
+    """Atomically move the campaign to 'discovering', or raise 404 / 409."""
     conn = await get_db_connection()
     try:
-        cursor = await conn.execute("SELECT status FROM campaigns WHERE id = ?", (campaign_id,))
-        camp = await cursor.fetchone()
+        cur = await conn.execute(
+            "UPDATE campaigns SET status = 'discovering' WHERE id = ? AND status IS NOT 'discovering'",
+            (campaign_id,))
+        await conn.commit()
+        if cur.rowcount:
+            return
+        cur = await conn.execute("SELECT 1 FROM campaigns WHERE id = ?", (campaign_id,))
+        exists = await cur.fetchone()
     finally:
         await conn.close()
-    if not camp:
+    if not exists:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if camp["status"] == "discovering":
-        raise HTTPException(status_code=409, detail="Discovery is already running for this campaign.")
+    raise HTTPException(status_code=409, detail="Discovery is already running for this campaign.")
 
 
 @router.post("/{campaign_id}/discover")
 async def trigger_campaign_discovery(campaign_id: int, background_tasks: BackgroundTasks):
-    await _require_idle_campaign(campaign_id)
+    await _claim_discovery(campaign_id)
     background_tasks.add_task(run_discovery_task, campaign_id, False)
     return {"id": campaign_id, "status": "discovering"}
 
 
 @router.post("/{campaign_id}/refresh-search")
 async def refresh_campaign_search(campaign_id: int, background_tasks: BackgroundTasks):
-    await _require_idle_campaign(campaign_id)
+    await _claim_discovery(campaign_id)
     background_tasks.add_task(run_refresh_task, campaign_id)
     return {"id": campaign_id, "status": "discovering"}
 

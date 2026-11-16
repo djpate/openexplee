@@ -167,3 +167,23 @@ async def test_409_when_already_discovering(db, calls, path):
         r = await c.post(f"/api/campaigns/{cid}/{path}")
     assert r.status_code == 409
     assert r.json() == {"detail": "Discovery is already running for this campaign."}
+
+
+@pytest.mark.parametrize("path", ["discover", "refresh-search"])
+async def test_concurrent_requests_only_one_wins(db, calls, path, monkeypatch):
+    import asyncio
+
+    async def slow_refresh(cid):
+        await asyncio.sleep(0.3)
+        return {"inserted": 0, "pool_total": 0, "messages": []}
+
+    async def slow_batch(cid, size, vp):
+        await asyncio.sleep(0.3)
+        return {"processed": 0, "leads": 0, "skipped": 0, "lead_ids": []}
+
+    monkeypatch.setattr(campaigns, "refresh_campaign_pool", slow_refresh)
+    monkeypatch.setattr(campaigns, "process_next_batch", slow_batch)
+    cid = await _make()
+    async with await _client() as c:
+        rs = await asyncio.gather(*[c.post(f"/api/campaigns/{cid}/{path}") for _ in range(2)])
+    assert sorted(r.status_code for r in rs) == [200, 409]
