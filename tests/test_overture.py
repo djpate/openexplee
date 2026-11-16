@@ -215,6 +215,11 @@ def sql_rows(monkeypatch):
             seen.extend(rows)
             return rows
 
+        def fetchmany(self, *a):
+            rows = self.con.fetchmany(*a)
+            seen.extend(rows)
+            return rows
+
         def fetchone(self):
             return self.con.fetchone()
 
@@ -300,3 +305,88 @@ def test_cap_message_uses_thousands_separator(overture_files, monkeypatch):
     rows = overture.fetch_places("local", ["dental_clinic"], [area()], 0.5, max_places=1000, messages=msgs)
     assert len(rows) == 1000 and rows[0]["source_id"] == "p1000"
     assert msgs[0].startswith("More than 1,000 businesses matched. Kept the 1,000 best-ranked.")
+
+
+def test_place_in_two_areas_counts_once_at_best_tier_before_cap(overture_files, monkeypatch):
+    write_places, _ = overture_files
+    write_places(overture.settings.overture_places_source, [
+        place(id="both", confidence=0.5),  # in Tampa (tier 1) and Florida (tier 2)
+        place(id="orl-99", confidence=0.99, lon=-81.38, lat=28.54),
+        place(id="orl-98", confidence=0.98, lon=-81.38, lat=28.54),
+    ])
+    areas = [area("Florida", 2, FL_BOX, {"FL", "Florida"}, "US", kind="region"), area("Tampa", 1)]
+    msgs = []
+    rows = overture.fetch_places("local", ["dental_clinic"], areas, 0.5, max_places=3, messages=msgs)
+    assert [(r["source_id"], r["tier"]) for r in rows] == [("both", 1), ("orl-99", 2), ("orl-98", 2)]
+    assert msgs == []  # 3 distinct places, not 4 rows
+    rows = overture.fetch_places("local", ["dental_clinic"], areas, 0.5, max_places=2, messages=msgs)
+    assert [(r["source_id"], r["tier"]) for r in rows] == [("both", 1), ("orl-99", 2)]
+    assert len(msgs) == 1 and msgs[0].startswith("More than 2 businesses matched.")
+
+
+def test_place_query_streams_without_sql_top_n(overture_files, monkeypatch):
+    write_places, _ = overture_files
+    write_places(overture.settings.overture_places_source, [place()])
+    calls = []
+    real = overture._connect
+
+    class Spy:
+        def __init__(self, con):
+            self.con = con
+
+        def execute(self, sql, params=None):
+            calls.append(("execute", sql))
+            self.con.execute(sql, params)
+            return self
+
+        def fetchall(self):
+            calls.append(("fetchall", None))
+            return self.con.fetchall()
+
+        def fetchmany(self, *a):
+            calls.append(("fetchmany", None))
+            return self.con.fetchmany(*a)
+
+        def close(self):
+            self.con.close()
+
+    monkeypatch.setattr(overture, "_connect", lambda *src: Spy(real(*src)))
+    assert len(overture.fetch_places("local", ["dental_clinic"], [area()], 0.5)) == 1
+    sql = next(q for kind, q in calls if kind == "execute")
+    assert "QUALIFY" not in sql and "ORDER BY" not in sql and "LIMIT" not in sql
+    assert ("fetchall", None) not in calls and ("fetchmany", None) in calls
+
+
+def _rank(r):  # test rows: (id, confidence, tier)
+    return (r[2], -r[1], r[0])
+
+
+def test_best_ranked_dedupes_then_caps_with_bounded_memory():
+    # "x" first streams at tier 2 and is pruned, then returns at tier 1 with the best rank;
+    # "y" is pruned at tier 1 and later returns at tier 2: it must not come back.
+    chunks = [
+        [("x", 0.99, 2), ("y", 0.2, 1)],
+        [(f"f{i}", 0.5 + i / 100, 1) for i in range(10)],  # 12 ids > 2*3: prune to f9, f8, f7
+        [("x", 0.99, 1), ("y", 0.2, 2), ("f9", 0.59, 2)],
+    ]
+    rows = overture._best_ranked(iter(chunks), 3, _rank)
+    assert rows == [("x", 0.99, 1), ("f9", 0.59, 1), ("f8", 0.58, 1)]
+    rows = overture._best_ranked(iter(chunks), 0, _rank)  # no cap: every id once, at its best rank
+    assert len(rows) == 12 and ("x", 0.99, 1) in rows and ("y", 0.2, 1) in rows
+    assert ("x", 0.99, 2) not in rows and ("f9", 0.59, 2) not in rows
+
+
+def test_best_ranked_holds_at_most_twice_the_cap_plus_a_chunk(monkeypatch):
+    sizes = []
+    real_nsmallest = overture.heapq.nsmallest
+
+    def spy(n, it, key):
+        it = list(it)
+        sizes.append(len(it))
+        return real_nsmallest(n, it, key=key)
+
+    monkeypatch.setattr(overture.heapq, "nsmallest", spy)
+    chunks = ([(f"p{c}-{i}", (c * 100 + i) / 10000, 1) for i in range(100)] for c in range(50))
+    rows = overture._best_ranked(chunks, 10, _rank)
+    assert rows[0] == ("p49-99", 0.4999, 1) and len(rows) == 10
+    assert sizes and max(sizes) <= 2 * 10 + 100

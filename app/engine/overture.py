@@ -2,6 +2,7 @@
 
 All functions are synchronous (DuckDB); async callers wrap them in asyncio.to_thread.
 """
+import heapq
 import json
 import re
 import time
@@ -15,6 +16,7 @@ from app.config import settings
 S3_BASE = "s3://overturemaps-us-west-2/release"
 RELEASE_TTL = 24 * 3600
 WIDE_BOX_DEGREES = 180.0  # a box wider than this can't prune by longitude
+_FETCH_CHUNK = 10_000
 SUBTYPES = {
     "locality": ("locality", "localadmin"),
     "county": ("county",),
@@ -256,6 +258,30 @@ def _region_filter(values: set[str]) -> tuple[str, list[str]]:
             "OR addresses[1].region IS NULL OR addresses[1].region = '')", vals)
 
 
+def _place_rank(row) -> tuple:
+    """Sort key for a place row (_PLACE_COLUMNS + tier): tier, then confidence desc, then id."""
+    return (row[-1], -row[7], row[0])
+
+
+def _best_ranked(chunks, keep: int, rank) -> list:
+    """Dedupe rows by id (row[0]), keeping each id's best rank, then return the `keep`
+    best-ranked rows in rank order (keep <= 0: all of them).
+
+    Memory stays bounded: whenever more than 2*keep ids are held, only the best `keep`
+    are kept. That can't drop a row that belongs in the result, since each dropped row
+    already has `keep` better-ranked ids ahead of it, and those only get better."""
+    best: dict = {}
+    for chunk in chunks:
+        for row in chunk:
+            cur = best.get(row[0])
+            if cur is None or rank(row) < rank(cur):
+                best[row[0]] = row
+        if keep > 0 and len(best) > 2 * keep:
+            best = {r[0]: r for r in heapq.nsmallest(keep, best.values(), key=rank)}
+    rows = sorted(best.values(), key=rank)
+    return rows[:keep] if keep > 0 else rows
+
+
 def _cap_message(cap: int) -> str:
     return (f"More than {cap:,} businesses matched. Kept the {cap:,} best-ranked. "
             "Narrow the area or business types to see others.")
@@ -266,7 +292,11 @@ def fetch_places(release: str, categories: list[str], areas: list[ResolvedArea],
                  messages: list[str] | None = None) -> list[dict]:
     """Places in the areas, one row per place at its best (lowest) tier, ranked by tier
     then confidence. At most max_places rows (default OVERTURE_MAX_PLACES; 0 = no cap);
-    when more matched, a note goes to `messages`. Country/region filters run in SQL."""
+    when more matched, a note goes to `messages`.
+
+    Country/region filters run in SQL, so foreign rows never reach Python. Dedupe and
+    the cap run in Python while streaming: a SQL top-N over these wide rows more than
+    doubled DuckDB's peak memory (nationwide 7.4 GB -> 17.6 GB, measured)."""
     if not categories or not areas:
         return []
     cap = settings.overture_max_places if max_places is None else max_places
@@ -295,16 +325,12 @@ def fetch_places(release: str, categories: list[str], areas: list[ResolvedArea],
             selects.append(
                 f"SELECT {_PLACE_COLUMNS}, {int(a.tier)} AS tier "
                 f"FROM read_parquet({_lit(src)}, hive_partitioning=1) WHERE " + " AND ".join(where))
-    sql = ("SELECT * FROM (" + " UNION ALL ".join(selects) + ") "
-           "QUALIFY row_number() OVER (PARTITION BY id ORDER BY tier) = 1 "
-           "ORDER BY tier, confidence DESC, id")
-    if cap > 0:
-        sql += " LIMIT ?"
-        params.append(cap + 1)
     try:
         con = _connect(src)
         try:
-            rows = con.execute(sql, params).fetchall()
+            con.execute(" UNION ALL ".join(selects), params)
+            rows = _best_ranked(iter(lambda: con.fetchmany(_FETCH_CHUNK), []),
+                                cap + 1 if cap > 0 else 0, _place_rank)
         finally:
             con.close()
     except duckdb.Error as e:
