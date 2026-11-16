@@ -2,9 +2,12 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, List
 from app.database import get_db_connection
-from app.engine.discovery import discover_leads_for_icp
-from app.engine.verifier import verify_email_smtp
-from app.engine.copywriter import generate_cold_email
+import json
+from app.config import settings
+from app.engine.discovery import refresh_campaign_pool
+from app.engine.lead_builder import process_next_batch
+from app.engine.overture import OvertureError
+from app.engine.search_plan import PlanError
 from app.engine.sequencer import dispatch_campaign_batch, get_next_available_inbox
 from app.engine.analyzer import analyze_my_product
 
@@ -48,21 +51,15 @@ async def launch_autopilot(req: AutopilotRequest, background_tasks: BackgroundTa
             icp_query = icp.get("icp_query") or value_prop
             cursor = await conn.execute(
                 """
-                INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status)
-                VALUES (?, ?, ?, ?, 'discovering')
+                INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size)
+                VALUES (?, ?, ?, ?, 'discovering', ?)
                 """,
-                (camp_name, icp_query, product_name[:80], value_prop),
+                (camp_name, icp_query, product_name[:80], value_prop,
+                 max(1, min(req.leads_per_campaign, 1000))),
             )
             cid = cursor.lastrowid
             created.append({"id": cid, "name": camp_name, "icp_query": icp_query})
-            background_tasks.add_task(
-                run_discovery_task,
-                cid,
-                icp_query,
-                value_prop,
-                req.auto_send,
-                max(1, min(req.leads_per_campaign, 15)),
-            )
+            background_tasks.add_task(run_discovery_task, cid, req.auto_send)
         await conn.commit()
     finally:
         await conn.close()
@@ -83,114 +80,62 @@ class CampaignCreate(BaseModel):
     target_industry: Optional[str] = "B2B SaaS"
     value_proposition: str
     auto_send: bool = False
+    batch_size: Optional[int] = None
 
 
-async def run_discovery_task(
-    campaign_id: int,
-    icp_prompt: str,
-    value_prop: str,
-    auto_send: bool = False,
-    max_companies: int = 8,
-):
-    # Set status to discovering
+async def _set_campaign(campaign_id: int, status: str, message: Optional[str] = None):
     conn = await get_db_connection()
     try:
-        await conn.execute("UPDATE campaigns SET status = 'discovering' WHERE id = ?", (campaign_id,))
+        if message is None:
+            await conn.execute("UPDATE campaigns SET status = ? WHERE id = ?", (status, campaign_id))
+        else:
+            await conn.execute(
+                "UPDATE campaigns SET status = ?, discovery_message = ? WHERE id = ?",
+                (status, message, campaign_id),
+            )
         await conn.commit()
     finally:
         await conn.close()
 
+
+def _failure_message(e: Exception) -> str:
+    if isinstance(e, (PlanError, OvertureError)):
+        return str(e)
+    return f"Discovery failed: {type(e).__name__}: {e}"
+
+
+async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
+    await _set_campaign(campaign_id, "discovering")
     try:
-        leads = await discover_leads_for_icp(icp_prompt, max_companies=max_companies)
-
-        # A second discovery run must not add a company the campaign already holds.
         conn = await get_db_connection()
         try:
-            cur = await conn.execute("SELECT company_domain FROM leads WHERE campaign_id = ?", (campaign_id,))
-            known = {r["company_domain"] for r in await cur.fetchall()}
+            cur = await conn.execute(
+                "SELECT search_plan, batch_size, value_proposition FROM campaigns WHERE id = ?", (campaign_id,))
+            camp = await cur.fetchone()
         finally:
             await conn.close()
-        leads = [l for l in leads if l["company_domain"] not in known]
-
-        enriched_leads = []
-        for l in leads:
-            # No status from discovery means nobody checked the mailbox: verify it, never assume.
-            ver_status = l.get("verification_status") or "unverified"
-            ver_reason = l.get("verification_details") or ""
-            if ver_status == "unverified" and l.get("email"):
-                try:
-                    ver_res = await verify_email_smtp(l["email"], timeout=2.0)
-                    ver_status = ver_res.get("status", "deliverable")
-                    ver_reason = ver_res.get("details", "")
-                except Exception as ve:
-                    ver_reason = str(ve)
-
-            # Auto-draft AI personalized email
-            subject = f"quick question for {l['company_name']}"
-            body = f"Hi {l['contact_name'].split()[0] if l.get('contact_name') else 'there'},\n\nSaw what you are building at {l['company_name']} and wanted to connect."
-            try:
-                email_draft = await generate_cold_email(
-                    company_name=l["company_name"],
-                    company_domain=l["company_domain"],
-                    contact_name=l["contact_name"],
-                    job_title=l["job_title"],
-                    company_summary=l.get("summary", ""),
-                    value_proposition=value_prop
-                )
-                if email_draft.get("subject"):
-                    subject = email_draft["subject"]
-                if email_draft.get("body"):
-                    body = email_draft["body"]
-            except Exception as ge:
-                print(f"[Discovery] Copy generation note: {ge}")
-
-            enriched_leads.append({
-                **l,
-                "verification_status": ver_status,
-                "verification_reason": ver_reason,
-                "personalized_subject": subject,
-                "personalized_body": body,
-            })
-
-        # Save to DB in one clean transaction
-        conn = await get_db_connection()
-        try:
-            for l in enriched_leads:
-                await conn.execute("""
-                    INSERT INTO leads (
-                        campaign_id, company_name, company_domain, website_url,
-                        contact_name, job_title, email, status,
-                        verification_status, verification_reason,
-                        personalized_subject, personalized_body
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'enriched', ?, ?, ?, ?)
-                """, (
-                    campaign_id, l["company_name"], l["company_domain"], l["website_url"],
-                    l["contact_name"], l["job_title"], l["email"],
-                    l["verification_status"], l["verification_reason"],
-                    l["personalized_subject"], l["personalized_body"]
-                ))
-
-            await conn.execute("""
-                UPDATE campaigns 
-                SET total_leads = (SELECT COUNT(*) FROM leads WHERE campaign_id = ?),
-                    status = 'ready'
-                WHERE id = ?
-            """, (campaign_id, campaign_id))
-            await conn.commit()
-        finally:
-            await conn.close()
-
+        if not camp:
+            return
+        if not camp["search_plan"]:
+            await refresh_campaign_pool(campaign_id)
+        res = await process_next_batch(
+            campaign_id, camp["batch_size"] or settings.discovery_batch_size, camp["value_proposition"] or "")
+        await _set_campaign(campaign_id, "ready")
         if auto_send:
-            await dispatch_campaign_batch(campaign_id, limit=max_companies)
-
+            await dispatch_campaign_batch(campaign_id, limit=res.get("leads", 0))
     except Exception as e:
         print(f"[Campaign Task Error]: {e}")
-        conn = await get_db_connection()
-        try:
-            await conn.execute("UPDATE campaigns SET status = 'error' WHERE id = ?", (campaign_id,))
-            await conn.commit()
-        finally:
-            await conn.close()
+        await _set_campaign(campaign_id, "error", _failure_message(e))
+
+
+async def run_refresh_task(campaign_id: int) -> None:
+    await _set_campaign(campaign_id, "discovering")
+    try:
+        await refresh_campaign_pool(campaign_id)
+        await _set_campaign(campaign_id, "ready")
+    except Exception as e:
+        print(f"[Campaign Refresh Error]: {e}")
+        await _set_campaign(campaign_id, "error", _failure_message(e))
 
 
 @router.get("")
@@ -199,6 +144,9 @@ async def list_campaigns():
     cursor = await conn.execute("""
         SELECT c.*, 
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.verification_status IN ('verified', 'deliverable')) as verified_count,
+            (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'done') as pool_done,
+            (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'skipped') as pool_skipped,
+            (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'processing') as pool_processing,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status = 'sent') as sent_leads_count,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '') as ready_leads_count
         FROM campaigns c
@@ -210,6 +158,10 @@ async def list_campaigns():
     result = []
     for r in rows:
         d = dict(r)
+        try:
+            d["search_plan"] = json.loads(d["search_plan"]) if d.get("search_plan") else None
+        except (TypeError, ValueError):
+            d["search_plan"] = None
         total = d.get("total_leads") or 0
         sent = d.get("sent_count") or d.get("sent_leads_count") or 0
         raw_status = d.get("status", "draft")
@@ -233,16 +185,17 @@ async def list_campaigns():
 @router.post("")
 async def create_campaign(req: CampaignCreate, background_tasks: BackgroundTasks):
     conn = await get_db_connection()
+    batch_size = max(1, min(req.batch_size or settings.discovery_batch_size, 1000))
     cursor = await conn.execute("""
-        INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status)
-        VALUES (?, ?, ?, ?, 'draft')
-    """, (req.name, req.icp_prompt, req.target_industry, req.value_proposition))
+        INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size)
+        VALUES (?, ?, ?, ?, 'draft', ?)
+    """, (req.name, req.icp_prompt, req.target_industry, req.value_proposition, batch_size))
     campaign_id = cursor.lastrowid
     await conn.commit()
     await conn.close()
 
     # Automatically trigger discovery in the background
-    background_tasks.add_task(run_discovery_task, campaign_id, req.icp_prompt, req.value_proposition, req.auto_send)
+    background_tasks.add_task(run_discovery_task, campaign_id, req.auto_send)
 
     return {"id": campaign_id, "name": req.name, "status": "discovering"}
 
@@ -265,25 +218,30 @@ async def get_campaign(campaign_id: int):
     return result
 
 
-@router.post("/{campaign_id}/discover")
-async def trigger_campaign_discovery(campaign_id: int, background_tasks: BackgroundTasks):
+async def _require_idle_campaign(campaign_id: int):
     conn = await get_db_connection()
     try:
-        cursor = await conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+        cursor = await conn.execute("SELECT status FROM campaigns WHERE id = ?", (campaign_id,))
         camp = await cursor.fetchone()
-        if not camp:
-            raise HTTPException(status_code=404, detail="Campaign not found")
-        camp_dict = dict(camp)
     finally:
         await conn.close()
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if camp["status"] == "discovering":
+        raise HTTPException(status_code=409, detail="Discovery is already running for this campaign.")
 
-    background_tasks.add_task(
-        run_discovery_task,
-        campaign_id,
-        camp_dict["icp_prompt"],
-        camp_dict.get("value_proposition") or "",
-        False
-    )
+
+@router.post("/{campaign_id}/discover")
+async def trigger_campaign_discovery(campaign_id: int, background_tasks: BackgroundTasks):
+    await _require_idle_campaign(campaign_id)
+    background_tasks.add_task(run_discovery_task, campaign_id, False)
+    return {"id": campaign_id, "status": "discovering"}
+
+
+@router.post("/{campaign_id}/refresh-search")
+async def refresh_campaign_search(campaign_id: int, background_tasks: BackgroundTasks):
+    await _require_idle_campaign(campaign_id)
+    background_tasks.add_task(run_refresh_task, campaign_id)
     return {"id": campaign_id, "status": "discovering"}
 
 

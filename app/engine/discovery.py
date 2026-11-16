@@ -271,85 +271,6 @@ async def _search_queries_for_icp(icp_prompt: str) -> List[str]:
     return queries or [" ".join(icp_prompt.split()[:10])]
 
 
-async def discover_leads_for_icp(icp_prompt: str, max_companies: int = 10) -> List[Dict[str, Any]]:
-    """
-    Takes a natural-language ICP (e.g. 'B2B SaaS companies in California using Stripe')
-    and discovers target companies, decision-makers, and verified emails.
-    """
-    suppressed_domains = await _get_suppressed_domains()
-
-    # 1. Gather candidate domains from web search
-    raw_results = []
-
-    # 2. Execute Web Search across search engines to discover additional organic hits
-    for search_query in await _search_queries_for_icp(icp_prompt):
-        found = []
-        if settings.serper_api_key:
-            found = await search_serper(search_query, settings.serper_api_key, max_companies * 2)
-        if not found:
-            found = await search_bing(search_query, max_companies * 2)
-        if not found:
-            found = await search_duckduckgo(search_query, max_companies * 2)
-        raw_results.extend(found)
-
-    # 3. Filter, Deduplicate & Enforce Suppression List
-    seen_domains = set()
-    candidate_sites = []
-    for r in raw_results:
-        d = r.get("domain", "").lower()
-        if (
-            d
-            and d not in seen_domains
-            and d not in suppressed_domains
-            and not any(skip in d for skip in NON_COMPANY_HOSTS)
-        ):
-            seen_domains.add(d)
-            candidate_sites.append(r)
-        if len(candidate_sites) >= max_companies:
-            break
-
-    # 4. Deep Crawl Each Site & Extract Decision-Makers
-    discovered_leads = []
-    for site in candidate_sites:
-        intel = await scrape_company_website(site["url"])
-        domain = intel["domain"]
-        # Sites carry placeholder and third-party addresses (you@yourcompany.com). Keep the company's own.
-        intel["found_emails"] = [e for e in intel.get("found_emails", []) if e.endswith("@" + domain) or e.endswith("." + domain)]
-        company_name = site.get("title", "").split("-")[0].split("|")[0].strip() or domain
-
-        people = await _extract_people_with_llm(domain, intel.get("content_summary", ""))
-        if people:
-            p = people[0]
-            contact_name = f"{p['first_name']} {p['last_name']}"
-            job_title = p.get("job_title", "Decision Maker")
-            enriched = await enrich_person_email(p["first_name"], p["last_name"], domain)
-            email_candidate = enriched.get("email") or (intel["found_emails"][0] if intel.get("found_emails") else f"hello@{domain}")
-        elif intel.get("found_emails"):
-            contact_name = "Founder / Growth Lead"
-            job_title = "Decision Maker"
-            email_candidate = intel["found_emails"][0]
-        else:
-            # Fall back to role-based address at the verified domain
-            contact_name = f"Founder / Hiring Lead"
-            job_title = "Decision Maker"
-            email_candidate = f"contact@{domain}"
-
-        discovered_leads.append({
-            "company_name": company_name,
-            "company_domain": domain,
-            "website_url": intel["url"],
-            "contact_name": contact_name,
-            "job_title": job_title,
-            "email": email_candidate,
-            "found_emails": intel.get("found_emails", []),
-            "summary": intel.get("content_summary", "")[:1000],
-            "description": intel.get("description", ""),
-        })
-
-    return discovered_leads
-
-
-
 NO_SERPER_MESSAGE = (
     "This target isn't a local business type. Open map data covers it poorly. "
     "Add a Serper key in Settings for web search results."
@@ -422,6 +343,13 @@ async def refresh_campaign_pool(campaign_id: int) -> Dict[str, Any]:
     plan, places, web, messages, release = await _search_parts(row["icp_prompt"], plan)
     suppressed = await company_pool.suppressed_domains()
     held = await company_pool.held_domains(campaign_id)
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("SELECT company_domain FROM leads WHERE campaign_id = ?", (campaign_id,))
+        own = {company_pool.normalize_domain(r["company_domain"]) for r in await cur.fetchall()}
+    finally:
+        await conn.close()
+    held = held | (own - {""})
     inserted = 0
     for source, found in (("overture", places), ("serper", web)):
         if found:

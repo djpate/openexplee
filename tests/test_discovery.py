@@ -150,3 +150,20 @@ async def test_unresolved_areas_reported_and_all_unresolved_raises(world):
 
 def test_llm_recall_is_gone():
     assert not hasattr(discovery, "_suggest_domains_via_llm") and not hasattr(discovery, "ICP_CURATED_DOMAINS")
+
+
+async def test_refresh_excludes_own_existing_lead_domains(db, world):
+    cid = await _campaign()
+    conn = await get_db_connection()
+    try:
+        await conn.execute(
+            "INSERT INTO leads (campaign_id, company_name, company_domain) VALUES (?, 'T', 'WWW.tampadental.com')", (cid,))
+        await conn.commit()
+    finally:
+        await conn.close()
+    r = await refresh_campaign_pool(cid)
+    assert r["inserted"] == 0 and r["pool_total"] == 0
+
+
+def test_old_inline_discovery_is_gone():
+    assert not hasattr(discovery, "discover_leads_for_icp")
