@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import httpx
 import json
 import re
@@ -282,11 +283,17 @@ async def search_web_candidates(icp_prompt: str) -> List[Dict[str, Any]]:
     if not settings.serper_api_key:
         return []
     out = []
+    seen: Set[str] = set()
     for query in (await _search_queries_for_icp(icp_prompt))[: settings.serper_max_queries]:
         for r in await search_serper(query, settings.serper_api_key):
             domain = (r.get("domain") or "").lower()
             if not domain or any(skip in domain for skip in NON_COMPANY_HOSTS):
                 continue
+            # One hit per site: repeated hits on one domain are not a chain (keep the first).
+            key = company_pool.normalize_domain(r.get("url")) or domain
+            if key in seen:
+                continue
+            seen.add(key)
             title = (r.get("title") or "").split(" - ")[0].split("|")[0].strip()
             out.append({
                 "source_id": r["url"], "name": title or domain,
@@ -296,8 +303,10 @@ async def search_web_candidates(icp_prompt: str) -> List[Dict[str, Any]]:
     return out
 
 
-async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan]):
-    """Returns plan, overture places, web places, messages, release (uncleaned)."""
+async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan], on_plan=None):
+    """Returns plan, overture places, web places, messages, release (uncleaned).
+    on_plan(plan, release, messages) is awaited once the plan is built, validated and its
+    areas resolved, before the (slow) place fetch and web search."""
     release = await asyncio.to_thread(get_release)
     if plan is None:
         cats = await asyncio.to_thread(load_categories, release)
@@ -305,12 +314,16 @@ async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan]):
     messages = list(plan.messages)
     places: List[Dict[str, Any]] = []
     web: List[Dict[str, Any]] = []
+    areas = []
     if plan.categories:
         notes: List[str] = []
         areas, _ = await asyncio.to_thread(resolve_areas, plan.areas, release, notes)
         messages += notes
         if plan.areas and not areas:
             raise PlanError("None of the places in the target could be used. " + " ".join(notes))
+    if on_plan is not None:
+        await on_plan(plan, release, messages)
+    if plan.categories:
         places = await asyncio.to_thread(
             fetch_places, release, plan.categories, areas, settings.overture_min_confidence, None, messages
         )
@@ -330,6 +343,18 @@ async def search_companies_for_icp(icp_prompt: str, plan: Optional[SearchPlan] =
     return plan, cands, messages, release
 
 
+async def _save_search_state(campaign_id: int, plan: SearchPlan, release: str, messages: List[str]) -> None:
+    conn = await get_db_connection()
+    try:
+        await conn.execute(
+            "UPDATE campaigns SET search_plan = ?, overture_release = ?, discovery_message = ? WHERE id = ?",
+            (plan_to_json(plan), release, "\n".join(messages) or None, campaign_id),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
 async def refresh_campaign_pool(campaign_id: int) -> Dict[str, Any]:
     conn = await get_db_connection()
     try:
@@ -340,7 +365,10 @@ async def refresh_campaign_pool(campaign_id: int) -> Dict[str, Any]:
     if not row:
         raise ValueError(f"campaign {campaign_id} not found")
     plan = plan_from_json(row["search_plan"]) if row["search_plan"] else None
-    plan, places, web, messages, release = await _search_parts(row["icp_prompt"], plan)
+    # Store the plan before the fetch: the card shows it during a long first search,
+    # and a retry after a fetch failure reuses it.
+    plan, places, web, messages, release = await _search_parts(
+        row["icp_prompt"], plan, functools.partial(_save_search_state, campaign_id))
     suppressed = await company_pool.suppressed_domains()
     held = await company_pool.held_domains(campaign_id)
     conn = await get_db_connection()
@@ -355,13 +383,9 @@ async def refresh_campaign_pool(campaign_id: int) -> Dict[str, Any]:
         if found:
             cleaned = company_pool.clean_candidates(found, held, suppressed)
             inserted += await company_pool.save_pool(campaign_id, cleaned, source)
+    await _save_search_state(campaign_id, plan, release, messages)
     conn = await get_db_connection()
     try:
-        await conn.execute(
-            "UPDATE campaigns SET search_plan = ?, overture_release = ?, discovery_message = ? WHERE id = ?",
-            (plan_to_json(plan), release, "\n".join(messages), campaign_id),
-        )
-        await conn.commit()
         cur = await conn.execute("SELECT pool_total FROM campaigns WHERE id = ?", (campaign_id,))
         total = (await cur.fetchone())["pool_total"]
     finally:

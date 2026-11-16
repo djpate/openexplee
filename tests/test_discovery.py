@@ -4,8 +4,8 @@ from app.config import settings
 from app.database import get_db_connection
 from app.engine import discovery
 from app.engine.discovery import refresh_campaign_pool, search_companies_for_icp, search_web_candidates
-from app.engine.overture import AreaSpec
-from app.engine.search_plan import PlanError, SearchPlan
+from app.engine.overture import AreaSpec, OvertureError
+from app.engine.search_plan import PlanError, SearchPlan, plan_from_json
 from tests.overture_fixtures import division, overture_files, place  # noqa: F401
 
 
@@ -202,3 +202,78 @@ async def test_cap_message_reaches_search_messages_and_campaign(db, world, monke
     finally:
         await conn.close()
     assert "More than 1 businesses matched" in row["discovery_message"]
+
+
+async def _campaign_row(cid):
+    conn = await get_db_connection()
+    try:
+        return await (await conn.execute("SELECT * FROM campaigns WHERE id=?", (cid,))).fetchone()
+    finally:
+        await conn.close()
+
+
+async def test_plan_stored_before_fetch_and_reused_after_fetch_failure(db, world, monkeypatch):
+    calls, state, _ = world
+    real_fetch = discovery.fetch_places
+
+    def failing_fetch(*a, **k):
+        raise OvertureError("HTTP 503 from s3")
+
+    monkeypatch.setattr(discovery, "fetch_places", failing_fetch)
+    cid = await _campaign()
+    with pytest.raises(OvertureError):
+        await refresh_campaign_pool(cid)
+    row = await _campaign_row(cid)
+    assert plan_from_json(row["search_plan"]) == state["plan"] and row["overture_release"] == "local"
+
+    monkeypatch.setattr(discovery, "fetch_places", real_fetch)
+    r = await refresh_campaign_pool(cid)
+    assert calls["plan"] == 1 and r["inserted"] == 1
+
+
+async def test_first_fetch_sees_plan_already_stored(db, world, monkeypatch):
+    real_fetch = discovery.fetch_places
+    seen = {}
+    cid = await _campaign()
+
+    def watching_fetch(*a, **k):
+        import sqlite3
+        c = sqlite3.connect(str(db))
+        seen["plan"] = c.execute("SELECT search_plan FROM campaigns WHERE id=?", (cid,)).fetchone()[0]
+        c.close()
+        return real_fetch(*a, **k)
+
+    monkeypatch.setattr(discovery, "fetch_places", watching_fetch)
+    await refresh_campaign_pool(cid)
+    assert seen["plan"] and plan_from_json(seen["plan"]).categories == ["dental_clinic"]
+
+
+async def test_plan_error_stores_no_plan(db, world):
+    _, state, _ = world
+    state["plan"] = local_plan([AreaSpec("Nowhereville", "locality", 1, "US-FL", "US")])
+    cid = await _campaign()
+    with pytest.raises(PlanError):
+        await refresh_campaign_pool(cid)
+    assert (await _campaign_row(cid))["search_plan"] is None
+
+
+async def test_refresh_keeps_one_serper_candidate_for_repeated_domain(db, world, monkeypatch):
+    _, state, _ = world
+    monkeypatch.setattr(settings, "serper_api_key", "k")
+    state["plan"] = SearchPlan([], [], False, [])
+
+    async def same_site(q, key, max_results=15):
+        return [{"title": f"Acme {i}", "url": f"https://www.acme.io/page{i}", "domain": "acme.io", "snippet": ""}
+                for i in range(5)]
+
+    monkeypatch.setattr(discovery, "search_serper", same_site)
+    cid = await _campaign()
+    r = await refresh_campaign_pool(cid)
+    assert r["inserted"] == 1
+    conn = await get_db_connection()
+    try:
+        rows = await (await conn.execute(
+            "SELECT source, domain, website_url FROM campaign_companies WHERE campaign_id=?", (cid,))).fetchall()
+    finally:
+        await conn.close()
+    assert [tuple(x) for x in rows] == [("serper", "acme.io", "https://www.acme.io/page0")]
