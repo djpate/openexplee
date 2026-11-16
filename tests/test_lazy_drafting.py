@@ -281,6 +281,9 @@ async def test_discovery_stores_summary_and_drafts_nothing(monkeypatch):
     monkeypatch.setattr(lead_builder, "scrape_company_website", scrape)
     monkeypatch.setattr(lead_builder, "verify_email_smtp", verify)
     monkeypatch.setattr(lead_builder, "_extract_people_with_llm", people)
+    async def no_rating(*a, **k):
+        return None, ""
+    monkeypatch.setattr(lead_builder, "rate_lead_fit", no_rating)
     assert not hasattr(lead_builder, "generate_cold_email")
     out = await lead_builder.enrich_company(
         {"id": 1, "campaign_id": 1, "domain": "a.com", "website_url": "https://a.com", "name": "A",

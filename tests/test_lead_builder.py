@@ -72,6 +72,7 @@ class Fakes:
         monkeypatch.setattr(lead_builder, "verify_email_smtp", self.verify)
         monkeypatch.setattr(lead_builder, "_extract_people_with_llm", self.extract)
         monkeypatch.setattr(lead_builder, "enrich_person_email", self.enrich_person)
+        monkeypatch.setattr(lead_builder, "rate_lead_fit", self.rate)
 
     async def scrape(self, url):
         domain = normalize_domain(url)
@@ -90,6 +91,9 @@ class Fakes:
     async def extract(self, domain, text, job_titles=None):
         self.extracted.append((domain, text))
         return self.people.get(domain, [])
+
+    async def rate(self, company_name, company_domain, summary, site_facts, value_proposition):
+        return None, ""
 
     async def enrich_person(self, first, last, domain):
         self.guessed.append((first, last, domain))

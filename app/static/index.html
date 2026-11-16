@@ -342,6 +342,7 @@
           <span class="text-slate-300"><b id="leads-selected-count">0</b> selected</span>
           <button onclick="bulkDraftLeads()" class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-semibold transition">Draft emails</button>
           <button onclick="bulkRedraftLeads()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 rounded-lg transition">Redraft</button>
+          <button onclick="bulkRateLeads()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition">Rate fit</button>
           <button onclick="bulkDeleteLeads()" class="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-lg transition">Delete</button>
           <button onclick="toggleAllLeads(false)" class="px-2 py-1 text-slate-400 hover:text-white transition">Clear</button>
         </div>
@@ -351,6 +352,7 @@
               <tr>
                 <th class="py-3 pl-4 w-8"><input type="checkbox" id="leads-select-all" onchange="toggleAllLeads(this.checked)" title="Select all shown leads" class="rounded bg-slate-900 border-slate-700"></th>
                 <th class="py-3 px-4">Company & Domain</th>
+                <th class="py-3 px-4">Fit</th>
                 <th class="py-3 px-4">Contact Person</th>
                 <th class="py-3 px-4">Email & Verification</th>
                 <th class="py-3 px-4">AI Draft Preview</th>
@@ -360,7 +362,7 @@
             </thead>
             <tbody id="leads-table-body" class="divide-y divide-slate-800/60">
               <tr>
-                <td colspan="7" class="py-6 text-center text-slate-500">No leads discovered yet. Launch an ICP campaign
+                <td colspan="8" class="py-6 text-center text-slate-500">No leads discovered yet. Launch an ICP campaign
                   first!</td>
               </tr>
             </tbody>
@@ -729,7 +731,7 @@
                 class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
             </div>
             <div>
-              <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Claude Model for Name Extraction (Runs Per Company)</label>
+              <label class="block text-xs uppercase font-semibold text-slate-400 mb-1">Claude Model for Bulk Tasks (Name Extraction & Fit Rating)</label>
               <input type="text" id="settings-extraction-model" list="claude-model-options" placeholder="claude-haiku-5-5"
                 class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white">
             </div>
@@ -1016,6 +1018,44 @@
         </div>`;
     }
 
+    function renderFitBlock(c) {
+      const good = Number(c.fit_qualified || 0), out = Number(c.fit_disqualified || 0);
+      const unrated = Number(c.fit_unrated || 0), rating = Number(c.rating_count || 0);
+      if (!(good + out + unrated)) return '';
+      const min = Number(c.min_fit_score || 3);
+      const options = [1, 2, 3, 4, 5].map(n => `<option value="${n}"${n === min ? ' selected' : ''}>${n}</option>`).join('');
+      const action = rating
+        ? `<span class="text-indigo-300 animate-pulse">Rating ${rating}&hellip;</span>`
+        : unrated
+          ? `<button onclick="rateCampaignLeads(${Number(c.id)}, ${unrated})" class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 rounded-lg transition">Rate ${unrated}</button>`
+          : '';
+      return `
+        <div class="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-2">
+          <span>Fit: <b class="text-emerald-400">${good} good fit</b> &middot; <b class="text-rose-300">${out} disqualified</b>${unrated ? ` &middot; ${unrated} unrated` : ''}</span>
+          ${action}
+          <label class="flex items-center gap-1">Disqualify below
+            <select onchange="setMinFit(${Number(c.id)}, this.value)" class="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-200">${options}</select>
+          </label>
+        </div>`;
+    }
+
+    async function rateCampaignLeads(id, count) {
+      const res = await fetch(`/api/campaigns/${Number(id)}/rate`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return showToast(data.detail || 'Could not start rating', 'error');
+      showToast(`Rating fit for ${data.queued} leads in the background...`);
+      loadCampaigns();
+    }
+
+    async function setMinFit(id, value) {
+      const res = await fetch(`/api/campaigns/${Number(id)}/min-fit`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ min_fit_score: Number(value) })
+      });
+      if (!res.ok) return showToast('Could not update the threshold', 'error');
+      showToast(`Leads rated below ${Number(value)} are now disqualified`);
+      loadCampaigns(); loadLeads();
+    }
+
     function renderDraftButton(c) {
       const drafting = c.drafting_count || 0;
       const undrafted = c.undrafted_count || 0;
@@ -1174,6 +1214,7 @@
               <span>Sent: <b class="text-emerald-400">${c.sent_count || 0}</b></span>
             </div>
             ${renderPlanBlock(c)}
+            ${renderFitBlock(c)}
           </div>
           <div class="flex gap-2 items-center">
             ${renderDraftButton(c)}
@@ -1254,7 +1295,7 @@
       const leads = await res.json();
       const tbody = document.getElementById('leads-table-body');
       if (!leads.length) {
-        tbody.innerHTML = `<tr><td colspan="7" class="py-6 text-center text-slate-500">No leads found. Launch an ICP campaign to start crawling!</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="py-6 text-center text-slate-500">No leads found. Launch an ICP campaign to start crawling!</td></tr>`;
         return;
       }
 
@@ -1438,6 +1479,28 @@
       loadLeads(); loadCampaigns();
     }
 
+    async function bulkRateLeads() {
+      const ids = [...checkedLeadIds];
+      if (!ids.length) return;
+      const res = await fetch('/api/leads/rate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_ids: ids, rerate: true })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return showToast(data.detail || 'Could not start rating', 'error');
+      showToast(`Rating fit for ${data.queued} lead${data.queued === 1 ? '' : 's'} in the background...`);
+      toggleAllLeads(false);
+      loadLeads(); loadCampaigns();
+    }
+
+    async function setQualification(id, override) {
+      const res = await fetch(`/api/leads/${Number(id)}/qualification`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ override })
+      });
+      if (!res.ok) return showToast('Could not update the lead', 'error');
+      showToast(override === 'qualified' ? 'Lead requalified: it will be drafted and sent' : 'Lead disqualified: it won\'t be drafted or sent');
+      loadLeads(); loadCampaigns();
+    }
+
     async function bulkRedraftLeads() {
       const ids = [...checkedLeadIds];
       if (!ids.length) return;
@@ -1477,6 +1540,17 @@
       const domain = escapeHtml(l.company_domain || '');
       const statusClass = l.status === 'sent' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400';
       const draftHint = l.personalized_body ? 'Read / edit draft' : 'Open';
+      // Fit rating: score badge, reason, and a manual qualify/disqualify override.
+      const leadId = Number(l.id);
+      const fitScore = Number(l.fit_score) || 0;
+      const fitClass = fitScore >= 4 ? 'bg-emerald-500/15 text-emerald-300'
+        : fitScore === 3 ? 'bg-slate-800 text-slate-300' : fitScore ? 'bg-rose-500/15 text-rose-300' : 'bg-slate-900 text-slate-500';
+      const fitLabel = fitScore ? `${fitScore}/5` : '—';
+      const fitReason = escapeHtml(l.fit_reason || (fitScore ? '' : 'Not rated yet'));
+      const isDisqualified = Number(l.disqualified) === 1;
+      const fitToggle = isDisqualified
+        ? `<button onclick="setQualification(${leadId}, 'qualified')" class="text-[10px] text-indigo-400 hover:underline">Requalify</button>`
+        : `<button onclick="setQualification(${leadId}, 'disqualified')" class="text-[10px] text-slate-500 hover:text-rose-300">Disqualify</button>`;
 
       return `
           <tr class="hover:bg-slate-900/40">
@@ -1489,6 +1563,12 @@
               ${site
                 ? `<a href="${escapeHtml(site)}" target="_blank" rel="noopener noreferrer" class="text-xs text-indigo-400 hover:underline">${domain}</a>`
                 : `<span class="text-xs text-slate-500">${domain}</span>`}
+            </td>
+            <td class="py-3 px-4 max-w-[14rem]">
+              <span class="inline-block px-2 py-0.5 rounded text-[11px] font-bold ${fitClass}">${fitLabel}</span>
+              ${isDisqualified ? '<span class="inline-block ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-500/10 text-rose-300">Disqualified</span>' : ''}
+              <div class="text-[11px] text-slate-400 mt-0.5 line-clamp-2" title="${fitReason}">${fitReason}</div>
+              ${fitToggle}
             </td>
             <td class="py-3 px-4">
               <div class="font-medium text-slate-200">${escapeHtml(l.contact_name || '—')}</div>
@@ -2247,7 +2327,7 @@ ${escapeHtml(lead.personalized_body || 'No message body available.')}
         try {
           const res = await fetch('/api/campaigns');
           const camps = await res.json();
-          const isBusy = camps.some(c => c.status === 'discovering' || c.status === 'sending' || (c.drafting_count || 0) > 0);
+          const isBusy = camps.some(c => c.status === 'discovering' || c.status === 'sending' || (c.drafting_count || 0) > 0 || (c.rating_count || 0) > 0);
           if (isBusy) {
             loadDashboard();
             const activeTab = document.querySelector('.tab-btn.bg-indigo-500\\/10')?.id;

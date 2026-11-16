@@ -10,6 +10,7 @@ from app.engine.company_pool import refresh_pool_counters
 from app.engine.discovery import _extract_people_with_llm
 from app.engine.scraper import scrape_company_website
 from app.engine.site_check import analyze_site
+from app.engine.fit import rate_lead_fit
 from app.engine.verifier import enrich_person_email, verify_email_smtp
 
 # Bot walls: the site is alive but refuses scrapers, so only the Overture emails count.
@@ -22,7 +23,7 @@ LEAD_COLUMNS = (
     "contact_name", "first_name", "last_name", "job_title",
     "email", "verification_status", "verification_reason",
     "personalized_subject", "personalized_body", "status", "phone", "company_id",
-    "company_summary", "site_facts",
+    "company_summary", "site_facts", "fit_score", "fit_reason",
 )
 
 
@@ -118,6 +119,9 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
     # Drafting happens later (mass action or at send time); keep what the draft will need.
     summary = text[:1000] or ", ".join(x for x in place if x)
     phones = _json_list(company.get("phones"))
+    facts = analyze_site(intel)
+    # How much they likely need what this campaign offers (cheap bulk model); None if unrated.
+    fit_score, fit_reason = await rate_lead_fit(company_name, domain, summary, facts.get("lines"), value_prop)
     return {"lead": {
         "campaign_id": company.get("campaign_id"),
         "company_name": company_name,
@@ -136,7 +140,9 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
         "phone": phones[0] if phones else None,
         "company_id": company.get("id"),
         "company_summary": summary or None,
-        "site_facts": json.dumps(analyze_site(intel)),
+        "site_facts": json.dumps(facts),
+        "fit_score": fit_score,
+        "fit_reason": fit_reason or None,
     }}
 
 

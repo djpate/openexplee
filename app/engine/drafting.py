@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional
 from app.config import settings
 from app.database import get_db_connection
 from app.engine.copywriter import generate_cold_email
+from app.engine.fit import qualified_sql
 from app.engine.scraper import scrape_company_website
 from app.engine.site_check import analyze_site
 
@@ -19,7 +20,7 @@ _IN_FLIGHT: Dict[int, int] = {}
 # Leads that may still be emailed: same set the sender picks from.
 SENDABLE = (
     "status IN ('enriched', 'queued', 'discovered') AND verification_status != 'invalid' "
-    "AND email IS NOT NULL AND email != ''"
+    "AND email IS NOT NULL AND email != '' AND " + qualified_sql("leads")
 )
 UNDRAFTED = "(personalized_body IS NULL OR personalized_body = '')"
 
