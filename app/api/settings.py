@@ -18,6 +18,11 @@ PERSISTED_FIELDS = (
     "thor_ollama_model",
     "thor_cdp_url",
     "booking_url",
+    "sender_name",
+    "forward_to_email",
+    "reply_cc_email",
+    "postal_address",
+    "opt_out_line",
     "serper_api_key",
     "max_daily_sends_per_inbox",
 )
@@ -35,6 +40,11 @@ class SettingsUpdate(BaseModel):
     thor_ollama_model: Optional[str] = None
     thor_cdp_url: Optional[str] = None
     booking_url: Optional[str] = None
+    sender_name: Optional[str] = None
+    forward_to_email: Optional[str] = None
+    reply_cc_email: Optional[str] = None
+    postal_address: Optional[str] = None
+    opt_out_line: Optional[str] = None
     serper_api_key: Optional[str] = None
     max_daily_sends_per_inbox: Optional[int] = None
 
@@ -79,6 +89,11 @@ async def get_settings():
         "thor_ollama_model": settings.thor_ollama_model,
         "thor_cdp_url": settings.thor_cdp_url,
         "booking_url": settings.booking_url,
+        "sender_name": settings.sender_name,
+        "forward_to_email": settings.forward_to_email,
+        "reply_cc_email": settings.reply_cc_email,
+        "postal_address": settings.postal_address,
+        "opt_out_line": settings.opt_out_line,
         "serper_api_key": mask_key(settings.serper_api_key),
         "max_daily_sends_per_inbox": settings.max_daily_sends_per_inbox,
     }

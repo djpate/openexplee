@@ -20,7 +20,7 @@ async def generate_cold_email(
     job_title: str,
     company_summary: str,
     value_proposition: str,
-    sender_name: str = "Vikash",
+    sender_name: Optional[str] = None,
     provider: Optional[str] = None,
     api_key: Optional[str] = None
 ) -> Dict[str, str]:
@@ -28,9 +28,16 @@ async def generate_cold_email(
     Generates personalized cold outreach with your VPS Cal.com booking link
     using Claude Code subscription, Thor Ollama, or configured cloud APIs.
     """
+    sender_name = sender_name or settings.sender_name
     # "Founder / Hiring Lead" and similar are placeholders from discovery, not a person's name.
     contact_first = contact_name.split()[0] if contact_name and "/" not in contact_name else "there"
     booking_line = f"Booking link to include cleanly as a low-friction CTA: {settings.booking_url}" if settings.booking_url else ""
+    cta_rule = (
+        f"Low-friction call to action inviting a 15-min chat with the booking link ({settings.booking_url})."
+        if settings.booking_url
+        else "Low-friction call to action inviting a 15-min chat."
+    )
+    sign_off_rule = f"Sign off as {sender_name}." if sender_name else "End with a short sign-off (e.g. \"Best,\") and no name."
 
     prompt = f"""
 You are an elite B2B sales development representative writing a high-converting, hyper-personalized cold email.
@@ -51,8 +58,8 @@ Instructions:
 2. Body: Maximum 80-110 words.
 3. Sentence 1: Genuine observation based on what their company actually does.
 4. Sentence 2: Specific pain point related to our value proposition.
-5. Sentence 3: Low-friction call to action inviting a 15-min chat with the booking link ({settings.booking_url}).
-6. Sign off as {sender_name}. No cheesy buzzwords ("revolutionary", "synergy").
+5. Sentence 3: {cta_rule}
+6. {sign_off_rule} No cheesy buzzwords ("revolutionary", "synergy").
 
 Respond strictly in valid JSON with two fields:
 {{"subject": "...", "body": "..."}}
@@ -74,7 +81,7 @@ Respond strictly in valid JSON with two fields:
         f"Saw what {company_name} is building and wanted to reach out directly.\n\n"
         f"We've been helping teams like yours with {value_proposition.split(". ")[0].rstrip(".")}.\n\n"
         f"{cta}\n\n"
-        f"Best,\n{sender_name}"
+        "Best," + (f"\n{sender_name}" if sender_name else "")
     )
 
     return {"subject": subject, "body": body}

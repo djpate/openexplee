@@ -57,8 +57,8 @@ async def auto_setup_cloudflare_domain(
     api_token: str,
     zone_id: str,
     domain_name: str,
-    forward_to_email: str = "vikash@viktron.ai",
-    redirect_target_url: str = "https://viktron.ai"
+    forward_to_email: str,
+    redirect_target_url: str = "",
 ) -> Dict[str, Any]:
     """
     Automates complete domain setup on Cloudflare:

@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import re
+from app.config import settings
 from app.database import get_db_connection
 from app.engine.cloudflare import list_cloudflare_zones, auto_setup_cloudflare_domain
 
@@ -66,8 +67,8 @@ class CloudflareSetupRequest(BaseModel):
     api_token: str
     zone_id: str
     domain_name: str
-    forward_to_email: Optional[str] = "vikash@viktron.ai"
-    redirect_target_url: Optional[str] = "https://viktron.ai"
+    forward_to_email: Optional[str] = None  # defaults to settings.forward_to_email
+    redirect_target_url: Optional[str] = None
 
 
 @router.post("/zones")
@@ -80,12 +81,19 @@ async def get_zones(req: CloudflareAuthRequest):
 
 @router.post("/setup")
 async def setup_domain(req: CloudflareSetupRequest):
+    forward_to_email = req.forward_to_email or settings.forward_to_email
+    if not forward_to_email:
+        raise HTTPException(
+            status_code=400,
+            detail="Set a forwarding address first (FORWARD_TO_EMAIL, or 'Forward Replies To' in Settings) "
+                   "so replies and DMARC reports reach your real inbox.",
+        )
     result = await auto_setup_cloudflare_domain(
         api_token=req.api_token,
         zone_id=req.zone_id,
         domain_name=req.domain_name,
-        forward_to_email=req.forward_to_email or "vikash@viktron.ai",
-        redirect_target_url=req.redirect_target_url or "https://viktron.ai"
+        forward_to_email=forward_to_email,
+        redirect_target_url=req.redirect_target_url or "",
     )
     return result
 

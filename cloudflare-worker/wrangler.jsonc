@@ -10,7 +10,8 @@
     }
   ],
   "vars": {
-    "FORWARD_TO_EMAIL": "vikash@viktron.ai"
+    // Your real inbox. Inbound replies are forwarded here; leave empty to disable forwarding.
+    "FORWARD_TO_EMAIL": ""
   }
 }
 
