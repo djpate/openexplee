@@ -5,6 +5,7 @@ import re
 import shutil
 import time
 from typing import Any, Dict, Optional
+import anthropic
 import httpx
 from app.config import settings
 
@@ -130,24 +131,35 @@ async def _call_gemini(prompt: str, api_key: str) -> Optional[str]:
     return None
 
 
+# Models that accept the server-side refusal fallback (`fallbacks="default"`).
+_ANTHROPIC_FALLBACK_MODELS = {
+    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-2", "claude-fable-5-1",
+}
+
+
 async def _call_anthropic(prompt: str, api_key: str) -> Optional[str]:
-    async with httpx.AsyncClient(timeout=25.0) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "claude-3-5-haiku-latest",
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}],
-            },
+    model = settings.anthropic_model
+    extra: Dict[str, Any] = {}
+    if model in _ANTHROPIC_FALLBACK_MODELS:
+        # On a safety-classifier refusal, the API re-runs the request on a fallback model.
+        extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+
+    async with anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0) as client:
+        response = await client.beta.messages.create(
+            model=model,
+            max_tokens=16000,
+            # Short JSON extraction / 3-sentence copy: low effort keeps latency and cost down.
+            output_config={"effort": settings.anthropic_effort},
+            messages=[{"role": "user", "content": prompt}],
+            **extra,
         )
-        if resp.status_code == 200:
-            return resp.json()["content"][0]["text"]
-    return None
+
+    if response.stop_reason == "refusal":
+        print(f"[LLM:anthropic] refused ({response.stop_details.category if response.stop_details else 'unknown'})")
+        return None
+    # Current models return thinking blocks before the answer; only join the text blocks.
+    text = "".join(block.text for block in response.content if block.type == "text")
+    return text or None
 
 
 async def call_llm_json(prompt: str, provider: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Any]:
