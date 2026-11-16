@@ -1,7 +1,7 @@
 import asyncio
 from app.config import settings
 from app.database import get_db_connection
-from app.engine.sequencer import get_next_available_inbox, send_single_email
+from app.engine.sequencer import get_next_available_inbox, in_send_window, send_single_email
 
 
 async def reset_daily_inbox_quotas() -> int:
@@ -22,6 +22,8 @@ async def reset_daily_inbox_quotas() -> int:
 
 async def process_due_followups(limit: int = 10) -> int:
     """Sends scheduled Day-3 / Day-7 follow-ups for leads that have not replied yet."""
+    if not in_send_window():
+        return 0
     conn = await get_db_connection()
     try:
         cur = await conn.execute("""
@@ -50,10 +52,12 @@ async def process_due_followups(limit: int = 10) -> int:
         first_name = (lead.get("contact_name") or "there").split()[0]
 
         if lead.get("followup_step") == 1:
-            cal_line = f"\n\nHappy to jump on a quick 15-min call — pick any slot here: {settings.booking_url}" if settings.booking_url else "\n\nOpen to a quick 5-minute chat this week?"
+            # Same ask as the first email: a reply by email. The booking link only if one is set.
+            link_line = f"\n\nIf it's easier, you can also pick a time here: {settings.booking_url}" if settings.booking_url else ""
             body = (
                 f"{{Hi|Hey}} {first_name},\n\n"
-                f"Just bumping this to the top of your inbox in case it got buried.{cal_line}"
+                f"Just bumping this in case it got buried. If it sounds useful, reply here and "
+                f"I'll send over a couple of ideas.{link_line}"
             )
         else:
             body = (
@@ -74,7 +78,8 @@ async def run_scheduler_loop(interval_seconds: int = 300) -> None:
     while True:
         try:
             await reset_daily_inbox_quotas()
-            await process_due_followups(limit=5)
+            # One per tick (every 5 minutes), so follow-ups are spaced out too.
+            await process_due_followups(limit=1)
         except asyncio.CancelledError:
             break
         except Exception as exc:
