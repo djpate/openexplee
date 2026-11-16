@@ -89,3 +89,43 @@ async def test_sender_company_is_a_saved_setting(client):
     r = await client.post("/api/settings", json={"sender_company": "NapoleonLabs"})
     assert r.status_code == 200 and settings.sender_company == "NapoleonLabs"
     assert (await client.get("/api/settings")).json()["sender_company"] == "NapoleonLabs"
+
+
+# ---------- reply-only ask by default; per-campaign instructions ----------
+
+async def test_default_ask_is_an_email_reply_not_a_call(sender, captured):
+    await copywriter.generate_cold_email(**LEAD)
+    p = captured[0]
+    assert "Don't ask for a call or a meeting" in p
+    assert "open to a short call" not in p.lower()
+
+
+def test_default_instructions_mention_booking_link_only_when_set(monkeypatch):
+    monkeypatch.setattr(settings, "booking_url", "")
+    assert "http" not in copywriter.default_draft_instructions()
+    monkeypatch.setattr(settings, "booking_url", "https://cal.com/x")
+    assert "https://cal.com/x" in copywriter.default_draft_instructions()
+
+
+async def test_custom_instructions_replace_the_default_but_keep_the_fixed_parts(sender, captured):
+    await copywriter.generate_cold_email(**LEAD, instructions="Write like a friendly neighbour. Mention parking.")
+    p = captured[0]
+    assert "Write like a friendly neighbour. Mention parking." in p
+    assert "one concrete reason" not in p  # the default guidance is replaced
+    # Fixed parts the app relies on stay.
+    assert "Christophe" in p and "Lights Out Boxing" in p and "Hi Mike," in p
+    assert "Christophe\nNapoleonLabs" in p and '{"subject": "...", "body": "..."}' in p
+
+
+async def test_blank_instructions_fall_back_to_the_default(sender, captured):
+    await copywriter.generate_cold_email(**LEAD, instructions="   ")
+    assert "one concrete reason" in captured[0]
+
+
+async def test_fallback_template_never_asks_for_a_call(sender, monkeypatch):
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(copywriter, "call_llm_json", none)
+    out = await copywriter.generate_cold_email(**LEAD)
+    assert "call" not in out["body"].lower() and "reply" in out["body"].lower()

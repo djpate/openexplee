@@ -59,7 +59,9 @@ async def _load(lead_id: int, overwrite: bool = False):
     try:
         cur = await conn.execute(
             f"""SELECT l.*, (SELECT value_proposition FROM campaigns c WHERE c.id = l.campaign_id)
-                       AS value_proposition
+                       AS value_proposition,
+                   (SELECT draft_instructions FROM campaigns c WHERE c.id = l.campaign_id)
+                       AS draft_instructions
                 FROM (SELECT * FROM leads WHERE id = ? AND {_draftable(overwrite)}) l""",
             (lead_id,),
         )
@@ -92,6 +94,7 @@ async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
             job_title=lead.get("job_title") or "",
             company_summary=summary,
             value_proposition=lead.get("value_proposition") or "",
+            instructions=lead.get("draft_instructions"),
         )
         subject, body = (draft or {}).get("subject"), (draft or {}).get("body")
         if not subject or not body:

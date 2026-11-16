@@ -230,3 +230,11 @@ def test_campaign_card_offers_redraft(tmp_path):
     out = run_js(tmp_path, ["escapeHtml", "renderDraftButton"],
                  "renderDraftButton({id: 3, undrafted_count: 0, drafted_count: 24, drafting_count: 0})")
     assert "redraftCampaignEmails(3, 24)" in out and "Redraft 24" in out
+
+
+def test_email_instructions_editor_exists():
+    for s in ('id="instructions-modal"', 'id="instructions-text"', 'id="camp-instructions"',
+              "openInstructions(", "saveInstructions(", "resetInstructions(", "/draft-instructions"):
+        assert s in HTML, s
+    assert ".value" in js_function("openInstructions") and "innerHTML" not in js_function("openInstructions")
+    assert "draft_instructions" in js_function("handleCreateCampaign")

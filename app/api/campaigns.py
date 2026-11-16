@@ -11,6 +11,7 @@ from app.engine.overture import OvertureError
 from app.engine.search_plan import PlanError
 from app.engine.sequencer import dispatch_campaign_batch, get_next_available_inbox
 from app.engine.analyzer import analyze_my_product
+from app.engine.copywriter import default_draft_instructions
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -82,6 +83,18 @@ class CampaignCreate(BaseModel):
     value_proposition: str
     auto_send: bool = False
     batch_size: Optional[int] = None
+    draft_instructions: Optional[str] = None  # blank or the default -> use the live default
+
+
+class DraftInstructionsUpdate(BaseModel):
+    instructions: Optional[str] = None  # None, blank or the default -> back to the live default
+
+
+def _custom_instructions(text: Optional[str]) -> Optional[str]:
+    """What to store: None means "use the current default", so a campaign that never changed
+    its instructions keeps getting improvements to the default."""
+    text = (text or "").strip()
+    return None if not text or text == default_draft_instructions().strip() else text
 
 
 _KEEP = object()  # _set_campaign: leave discovery_message as it is
@@ -204,9 +217,11 @@ async def create_campaign(req: CampaignCreate, background_tasks: BackgroundTasks
     conn = await get_db_connection()
     batch_size = max(1, min(req.batch_size or settings.discovery_batch_size, 1000))
     cursor = await conn.execute("""
-        INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size)
-        VALUES (?, ?, ?, ?, 'draft', ?)
-    """, (req.name, req.icp_prompt, req.target_industry, req.value_proposition, batch_size))
+        INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size,
+                               draft_instructions)
+        VALUES (?, ?, ?, ?, 'draft', ?, ?)
+    """, (req.name, req.icp_prompt, req.target_industry, req.value_proposition, batch_size,
+          _custom_instructions(req.draft_instructions)))
     campaign_id = cursor.lastrowid
     await conn.commit()
     await conn.close()
@@ -263,6 +278,25 @@ async def trigger_campaign_discovery(campaign_id: int, background_tasks: Backgro
     await _claim_discovery(campaign_id)
     background_tasks.add_task(run_discovery_task, campaign_id, False)
     return {"id": campaign_id, "status": "discovering"}
+
+
+@router.get("/draft-instructions/default")
+async def get_default_draft_instructions():
+    return {"instructions": default_draft_instructions()}
+
+
+@router.put("/{campaign_id}/draft-instructions")
+async def update_draft_instructions(campaign_id: int, req: DraftInstructionsUpdate):
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("UPDATE campaigns SET draft_instructions = ? WHERE id = ?",
+                                 (_custom_instructions(req.instructions), campaign_id))
+        await conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+    finally:
+        await conn.close()
+    return {"ok": True, "uses_default": _custom_instructions(req.instructions) is None}
 
 
 @router.post("/{campaign_id}/draft")
