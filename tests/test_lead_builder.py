@@ -516,3 +516,13 @@ async def test_unexpected_error_returns_row_to_pending(db, monkeypatch, capsys):
     assert "boom.com" in capsys.readouterr().out
     camp = (await _fetch("SELECT pool_pending FROM campaigns WHERE id = ?", cid))[0]
     assert camp["pool_pending"] == 1
+
+
+async def test_lead_stores_site_facts_from_the_pages_read(monkeypatch):
+    import json
+    f = Fakes(monkeypatch)
+    f.sites["b.com"] = {"final_url": "https://b.com/",
+                        "pages": [{"url": "https://b.com/", "html": '<iframe src="https://fareharbor.com/x">', "kind": "home"}]}
+    lead = (await enrich_company(row("b.com"), "vp"))["lead"]
+    facts = json.loads(lead["site_facts"])
+    assert facts["booking_tools"] == ["FareHarbor"] and facts["lines"]

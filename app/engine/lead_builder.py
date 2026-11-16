@@ -9,6 +9,7 @@ from app.database import get_db_connection
 from app.engine.company_pool import refresh_pool_counters
 from app.engine.discovery import _extract_people_with_llm
 from app.engine.scraper import scrape_company_website
+from app.engine.site_check import analyze_site
 from app.engine.verifier import enrich_person_email, verify_email_smtp
 
 # Bot walls: the site is alive but refuses scrapers, so only the Overture emails count.
@@ -21,7 +22,7 @@ LEAD_COLUMNS = (
     "contact_name", "first_name", "last_name", "job_title",
     "email", "verification_status", "verification_reason",
     "personalized_subject", "personalized_body", "status", "phone", "company_id",
-    "company_summary",
+    "company_summary", "site_facts",
 )
 
 
@@ -135,6 +136,7 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
         "phone": phones[0] if phones else None,
         "company_id": company.get("id"),
         "company_summary": summary or None,
+        "site_facts": json.dumps(analyze_site(intel)),
     }}
 
 

@@ -339,3 +339,36 @@ async def test_campaign_list_reports_drafted_count(db, client):
     await _lead(db, cid, "c.com", status="sent", subject="s", body="b")
     c = [x for x in (await client.get("/api/campaigns")).json() if x["id"] == cid][0]
     assert c["drafted_count"] == 1 and c["undrafted_count"] == 1
+
+
+# ---------- site facts reach the draft ----------
+
+async def test_drafting_passes_stored_site_facts(db, monkeypatch):
+    import json
+    copy = FakeCopy()
+    monkeypatch.setattr(drafting, "generate_cold_email", copy)
+    cid = await _campaign(db)
+    lid = await _lead(db, cid, "a.com")
+    async with aiosqlite.connect(db) as c:
+        await c.execute("UPDATE leads SET site_facts = ? WHERE id = ?",
+                        (json.dumps({"checked": True, "lines": ["They have a contact form."]}), lid))
+        await c.commit()
+    await drafting.draft_leads([lid])
+    assert copy.calls[0]["site_facts"] == ["They have a contact form."]
+
+
+async def test_drafting_checks_the_site_when_a_lead_has_no_facts(db, monkeypatch):
+    copy = FakeCopy()
+
+    async def fake_scrape(url):
+        return {"content_summary": "We fix teeth.", "final_url": "https://a.com/",
+                "pages": [{"url": "https://a.com/", "html": '<a href="https://www.zocdoc.com/x">Book</a>', "kind": "home"}]}
+
+    monkeypatch.setattr(drafting, "generate_cold_email", copy)
+    monkeypatch.setattr(drafting, "scrape_company_website", fake_scrape)
+    cid = await _campaign(db)
+    lid = await _lead(db, cid, "a.com", summary=None)
+    await drafting.draft_leads([lid])
+    assert any("Zocdoc" in line for line in copy.calls[0]["site_facts"])
+    row = await _row(db, "SELECT site_facts FROM leads WHERE id=?", lid)
+    assert "Zocdoc" in row["site_facts"]

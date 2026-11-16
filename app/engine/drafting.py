@@ -4,12 +4,14 @@ Discovery no longer drafts, so the Claude cost of a draft is only paid for leads
 actually wants to email.
 """
 import asyncio
-from typing import Dict, Iterable, List
+import json
+from typing import Dict, Iterable, List, Optional
 
 from app.config import settings
 from app.database import get_db_connection
 from app.engine.copywriter import generate_cold_email
 from app.engine.scraper import scrape_company_website
+from app.engine.site_check import analyze_site
 
 # Leads being drafted right now, by lead id -> campaign id. Overlapping requests skip these.
 _IN_FLIGHT: Dict[int, int] = {}
@@ -71,6 +73,17 @@ async def _load(lead_id: int, overwrite: bool = False):
         await conn.close()
 
 
+def _stored_facts(raw: Optional[str]) -> Optional[dict]:
+    """A lead's saved website facts, or None if it was found before website checks existed."""
+    if not raw:
+        return None
+    try:
+        facts = json.loads(raw)
+        return facts if isinstance(facts, dict) else None
+    except ValueError:
+        return None
+
+
 async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
     """Drafts one lead. Returns 'drafted', 'skipped' (sent, no email, already being drafted,
     or already drafted unless overwrite) or 'failed'. overwrite=True replaces an existing draft."""
@@ -83,10 +96,15 @@ async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
             return "skipped"
         _IN_FLIGHT[lead_id] = lead["campaign_id"]
         summary = lead.get("company_summary") or ""
-        if not summary and lead.get("website_url"):
-            # Leads found before summaries were stored: re-read the site (no tokens).
+        facts = _stored_facts(lead.get("site_facts"))
+        new_facts: Optional[str] = None
+        if (not summary or facts is None) and lead.get("website_url"):
+            # Leads found before summaries or website checks existed: read the site now (no tokens).
             intel = await scrape_company_website(lead["website_url"])
-            summary = (intel.get("content_summary") or "")[:1000]
+            summary = summary or (intel.get("content_summary") or "")[:1000]
+            if facts is None:
+                facts = analyze_site(intel)
+                new_facts = json.dumps(facts)
         draft = await generate_cold_email(
             company_name=lead.get("company_name") or lead.get("company_domain") or "",
             company_domain=lead.get("company_domain") or "",
@@ -95,6 +113,7 @@ async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
             company_summary=summary,
             value_proposition=lead.get("value_proposition") or "",
             instructions=lead.get("draft_instructions"),
+            site_facts=(facts or {}).get("lines"),
         )
         subject, body = (draft or {}).get("subject"), (draft or {}).get("body")
         if not subject or not body:
@@ -104,8 +123,9 @@ async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
             # Without overwrite, only fill an empty draft: never replace copy someone edited meanwhile.
             await conn.execute(
                 f"UPDATE leads SET personalized_subject = ?, personalized_body = ?, "
-                f"company_summary = COALESCE(company_summary, ?) WHERE id = ? AND {_draftable(overwrite)}",
-                (subject, body, summary or None, lead_id),
+                f"company_summary = COALESCE(company_summary, ?), site_facts = COALESCE(site_facts, ?) "
+                f"WHERE id = ? AND {_draftable(overwrite)}",
+                (subject, body, summary or None, new_facts, lead_id),
             )
             await conn.commit()
         finally:
