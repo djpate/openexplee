@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    anthropic_model: str = "claude-opus-5-5"
+    anthropic_effort: str = "low"  # low | medium | high | xhigh | max
     groq_api_key: Optional[str] = None
     ollama_base_url: str = "http://localhost:11434"
     thor_ollama_url: str = "http://100.114.48.60:11434"

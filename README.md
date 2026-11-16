@@ -74,7 +74,7 @@ flowchart TD
 * **Multi-LLM Personalization:** Generate hyper-personalized cold outreach based on live website findings using:
   - **Google Gemini** (Recommended: fast, ultra-cheap)
   - **OpenAI** (`gpt-4o-mini`, `gpt-4o`)
-  - **Anthropic** (`claude-3-5-sonnet`, `claude-3-5-haiku`)
+  - **Anthropic** (`claude-opus-5-5` by default, configurable via `ANTHROPIC_MODEL`)
   - **Groq** (`llama-3.3-70b`)
   - **Ollama** (100% offline and free)
 * **Domain Firewall & DNS Deliverability Auditor:** Built-in SPF, DKIM, and DMARC record checker to ensure secondary domains have 100/100 health before sending.
