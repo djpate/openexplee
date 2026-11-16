@@ -1,11 +1,12 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.database import get_db_connection
 import json
 from app.config import settings
 from app.engine.discovery import refresh_campaign_pool
 from app.engine.drafting import draft_leads, drafting_count, sendable_lead_ids, undrafted_lead_ids
+from app.engine.fit import campaign_lead_ids, qualified_sql, rate_leads, rating_count
 from app.engine.lead_builder import process_next_batch
 from app.engine.overture import OvertureError
 from app.engine.search_plan import PlanError
@@ -168,16 +169,20 @@ async def run_refresh_task(campaign_id: int) -> None:
 @router.get("")
 async def list_campaigns():
     conn = await get_db_connection()
-    cursor = await conn.execute("""
-        SELECT c.*, 
+    q = qualified_sql("l")
+    cursor = await conn.execute(f"""
+        SELECT c.*,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.verification_status IN ('verified', 'deliverable')) as verified_count,
             (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'done') as pool_done,
             (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'skipped') as pool_skipped,
             (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'processing') as pool_processing,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status = 'sent') as sent_leads_count,
-            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '') as ready_leads_count,
-            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND (l.personalized_body IS NULL OR l.personalized_body = '')) as undrafted_count,
-            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND l.personalized_body IS NOT NULL AND l.personalized_body != '') as drafted_count
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND {q}) as ready_leads_count,
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND (l.personalized_body IS NULL OR l.personalized_body = '') AND {q}) as undrafted_count,
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND l.personalized_body IS NOT NULL AND l.personalized_body != '' AND {q}) as drafted_count,
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.fit_score IS NOT NULL AND {q}) as fit_qualified,
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND NOT {q}) as fit_disqualified,
+            (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.fit_score IS NULL AND l.fit_override IS NULL) as fit_unrated
         FROM campaigns c
         ORDER BY c.created_at DESC
     """)
@@ -208,6 +213,7 @@ async def list_campaigns():
             d["display_status"] = raw_status
 
         d["drafting_count"] = drafting_count(d["id"])
+        d["rating_count"] = rating_count(d["id"])
         result.append(d)
     return result
 
@@ -278,6 +284,40 @@ async def trigger_campaign_discovery(campaign_id: int, background_tasks: Backgro
     await _claim_discovery(campaign_id)
     background_tasks.add_task(run_discovery_task, campaign_id, False)
     return {"id": campaign_id, "status": "discovering"}
+
+
+class MinFitUpdate(BaseModel):
+    min_fit_score: int = Field(ge=1, le=5)
+
+
+@router.post("/{campaign_id}/rate")
+async def rate_campaign_leads(campaign_id: int, background_tasks: BackgroundTasks, rerate: bool = False):
+    """Rates fit for the campaign's unrated leads (or all of them with rerate=true), in the background."""
+    conn = await get_db_connection()
+    try:
+        found = await (await conn.execute("SELECT 1 FROM campaigns WHERE id = ?", (campaign_id,))).fetchone()
+    finally:
+        await conn.close()
+    if not found:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    ids = await campaign_lead_ids(campaign_id, overwrite=rerate)
+    if ids:
+        background_tasks.add_task(rate_leads, ids, rerate)
+    return {"queued": len(ids)}
+
+
+@router.put("/{campaign_id}/min-fit")
+async def update_min_fit(campaign_id: int, req: MinFitUpdate):
+    """Leads rated below this are disqualified (skipped by drafting and sending)."""
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("UPDATE campaigns SET min_fit_score = ? WHERE id = ?", (req.min_fit_score, campaign_id))
+        await conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+    finally:
+        await conn.close()
+    return {"ok": True}
 
 
 @router.get("/draft-instructions/default")

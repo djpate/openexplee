@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 from app.database import get_db_connection
 from app.engine.copywriter import resolve_spintax
 from app.engine.drafting import draft_lead
+from app.engine.fit import qualified_sql
 from app.config import settings
 
 
@@ -282,12 +283,14 @@ async def dispatch_campaign_batch(campaign_id: int, limit: int = 10) -> Dict[str
     """
     conn = await get_db_connection()
     try:
-        cur = await conn.execute("""
-            SELECT * FROM leads 
+        # Disqualified leads (fit below the campaign's threshold) are never sent.
+        cur = await conn.execute(f"""
+            SELECT * FROM leads
             WHERE campaign_id = ?
               AND status IN ('enriched', 'queued', 'discovered')
               AND verification_status != 'invalid'
               AND email IS NOT NULL AND email != ''
+              AND {qualified_sql("leads")}
             LIMIT ?
         """, (campaign_id, limit))
         leads = [dict(r) for r in await cur.fetchall()]

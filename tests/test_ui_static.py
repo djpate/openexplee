@@ -244,3 +244,28 @@ def test_draft_viewer_shows_site_facts_as_text():
     assert 'id="draft-facts"' in HTML
     opener = js_function("openDraft")
     assert "site_facts" in opener and "textContent" in opener and "innerHTML" not in opener
+
+
+# Lead fit rating UI.
+def test_leads_table_shows_fit_and_override(tmp_path):
+    out = run_js(tmp_path, ["escapeHtml", "safeHttpUrl", "renderLeadRow"], """[
+      renderLeadRow({id: 4, company_domain: 'a.com', status: 'enriched', fit_score: 2,
+                     fit_reason: 'Already on <b>Mindbody</b>', disqualified: 1}),
+      renderLeadRow({id: 5, company_domain: 'b.com', status: 'enriched', fit_score: 5, fit_reason: 'No booking', disqualified: 0})]""")
+    low, high = out
+    assert "2/5" in low and "Disqualified" in low and "setQualification(4, 'qualified')" in low
+    assert "&lt;b&gt;Mindbody&lt;/b&gt;" in low and "<b>Mindbody" not in low
+    assert "5/5" in high and "setQualification(5, 'disqualified')" in high
+
+
+def test_fit_controls_exist():
+    for s in ("bulkRateLeads(", "/api/leads/rate", "rateCampaignLeads(", "setMinFit(", "/min-fit", "/qualification"):
+        assert s in HTML, s
+    assert "rating_count" in js_function("startAutoPoll")
+
+
+def test_campaign_fit_block(tmp_path):
+    out = run_js(tmp_path, ["escapeHtml", "renderFitBlock"],
+                 "renderFitBlock({id: 3, fit_qualified: 15, fit_disqualified: 6, fit_unrated: 3, min_fit_score: 3, rating_count: 0})")
+    assert "15 good fit" in out and "6 disqualified" in out and "rateCampaignLeads(3, 3)" in out
+    assert 'onchange="setMinFit(3, this.value)"' in out and '<option value="3" selected>' in out

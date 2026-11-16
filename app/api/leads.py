@@ -1,11 +1,12 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import List, Literal, Optional
 from app.database import get_db_connection
 from app.engine.verifier import verify_email_smtp, generate_email_permutations, enrich_person_email
 from app.engine.copywriter import generate_cold_email
 from app.engine.company_pool import DELETED_BY_USER, refresh_pool_counters
 from app.engine.drafting import draft_leads, draftable_lead_ids
+from app.engine.fit import qualified_sql, ratable_lead_ids, rate_leads
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
 
@@ -46,10 +47,13 @@ class UpdateLeadRequest(BaseModel):
 @router.get("")
 async def list_leads(campaign_id: Optional[int] = None, limit: int = 50):
     conn = await get_db_connection()
+    # Best fit first, disqualified last; unrated leads sit with the middling ones.
+    select = (f"SELECT leads.*, (NOT {qualified_sql()}) AS disqualified FROM leads {{where}} "
+              "ORDER BY disqualified, COALESCE(fit_score, 3) DESC, id DESC LIMIT ?")
     if campaign_id:
-        cursor = await conn.execute("SELECT * FROM leads WHERE campaign_id = ? ORDER BY id DESC LIMIT ?", (campaign_id, limit))
+        cursor = await conn.execute(select.format(where="WHERE campaign_id = ?"), (campaign_id, limit))
     else:
-        cursor = await conn.execute("SELECT * FROM leads ORDER BY id DESC LIMIT ?", (limit,))
+        cursor = await conn.execute(select.format(where=""), (limit,))
     rows = await cursor.fetchall()
     await conn.close()
     return [dict(r) for r in rows]
@@ -191,6 +195,38 @@ async def bulk_draft_leads(req: LeadIdsRequest, background_tasks: BackgroundTask
     if ids:
         background_tasks.add_task(draft_leads, ids, req.redraft)
     return {"queued": len(ids)}
+
+
+class RateRequest(BaseModel):
+    lead_ids: List[int]
+    rerate: bool = False
+
+
+class QualificationUpdate(BaseModel):
+    override: Optional[Literal["qualified", "disqualified"]] = None  # None: follow the fit score
+
+
+@router.post("/rate")
+async def rate_selected_leads(req: RateRequest, background_tasks: BackgroundTasks):
+    """Rates fit for the selected leads (unrated ones, or all with rerate=true), in the background."""
+    ids = await ratable_lead_ids(req.lead_ids, overwrite=req.rerate)
+    if ids:
+        background_tasks.add_task(rate_leads, ids, req.rerate)
+    return {"queued": len(ids)}
+
+
+@router.put("/{lead_id}/qualification")
+async def set_qualification(lead_id: int, req: QualificationUpdate):
+    """Manually qualify or disqualify a lead, or clear the override to follow its fit score."""
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute("UPDATE leads SET fit_override = ? WHERE id = ?", (req.override, lead_id))
+        await conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Lead not found")
+    finally:
+        await conn.close()
+    return {"ok": True}
 
 
 @router.delete("/{lead_id}")
