@@ -269,3 +269,18 @@ def test_campaign_fit_block(tmp_path):
                  "renderFitBlock({id: 3, fit_qualified: 15, fit_disqualified: 6, fit_unrated: 3, min_fit_score: 3, rating_count: 0})")
     assert "15 good fit" in out and "6 disqualified" in out and "rateCampaignLeads(3, 3)" in out
     assert 'onchange="setMinFit(3, this.value)"' in out and '<option value="3" selected>' in out
+
+
+# Automatic daily sending and replies in the mailbox.
+def test_auto_send_switch(tmp_path):
+    on = run_js(tmp_path, ["escapeHtml", "renderAutoSend"], "renderAutoSend({id: 7, auto_send: 1})")
+    off = run_js(tmp_path, ["escapeHtml", "renderAutoSend"], "renderAutoSend({id: 7, auto_send: 0})")
+    assert 'onchange="setAutoSend(7, this.checked)" checked>' in on
+    assert 'onchange="setAutoSend(7, this.checked)">' in off
+    assert "/auto-send" in HTML
+
+
+def test_inbound_message_is_escaped(tmp_path):
+    out = run_js(tmp_path, ["escapeHtml", "renderInboundMessage"],
+                 "renderInboundMessage({direction: 'inbound', sender: 'mike@reef.com', subject: 'Re: <b>x</b>', body: 'Hi <script>', timestamp: '2026-11-16 10:00:00'})")
+    assert "mike@reef.com" in out and "&lt;script&gt;" in out and "<script>" not in out

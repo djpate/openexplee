@@ -67,6 +67,15 @@ async def release_interrupted_sends() -> int:
         await conn.close()
 
 
+POSTAL_ADDRESS_MISSING = ("Add your business postal address in Settings first. "
+                          "US law (CAN-SPAM) requires it in every cold email.")
+
+
+def compliance_ready() -> bool:
+    """Cold email needs a physical postal address in the footer before anything is sent."""
+    return bool((settings.postal_address or "").strip())
+
+
 def compliance_footer() -> str:
     """Opt-out line plus postal address, added under every cold email and follow-up."""
     lines = [settings.opt_out_line.strip(), settings.postal_address.strip()]
@@ -201,8 +210,8 @@ async def _send_via_smtp(
     if inbox.get("cc_email"):
         msg["Cc"] = inbox["cc_email"]
 
-    unsubscribe_mail = f"mailto:unsubscribe@{inbox['email'].split('@')[-1]}?subject=Unsubscribe"
-    msg["List-Unsubscribe"] = f"<{unsubscribe_mail}>"
+    # Goes to the sending inbox itself, where the inbox reader picks up "unsubscribe" requests.
+    msg["List-Unsubscribe"] = f"<mailto:{inbox['email']}?subject=unsubscribe>"
     msg.set_content(body)
 
     port = inbox.get("smtp_port", 587)
@@ -313,6 +322,8 @@ async def dispatch_campaign_batch(campaign_id: int, limit: int = 10) -> Dict[str
     Sends queued and verified leads for a given campaign using rotating inboxes.
     Blocks invalid emails automatically to protect sender domain reputation.
     """
+    if not compliance_ready():
+        return {"dispatched": 0, "errors": [POSTAL_ADDRESS_MISSING]}
     conn = await get_db_connection()
     try:
         # Disqualified leads (fit below the campaign's threshold) are never sent.
@@ -400,3 +411,42 @@ async def dispatch_campaign_batch(campaign_id: int, limit: int = 10) -> Dict[str
 
     return {"dispatched": dispatched, "errors": errors}
 
+
+
+SENDABLE_UNSENT = ("status IN ('enriched', 'queued', 'discovered') AND verification_status != 'invalid' "
+                   "AND email IS NOT NULL AND email != ''")
+
+
+async def sendable_count(campaign_id: int) -> int:
+    """Qualified leads in the campaign that haven't been emailed yet."""
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute(
+            f"SELECT COUNT(*) AS c FROM leads WHERE campaign_id = ? AND {SENDABLE_UNSENT} AND {qualified_sql('leads')}",
+            (campaign_id,))
+        row = await cur.fetchone()
+        return row["c"] if row else 0
+    finally:
+        await conn.close()
+
+
+async def run_campaign_send(campaign_id: int, limit: int = 20) -> None:
+    """Sends one batch in the background (the campaign is already marked 'sending'), then settles its status."""
+    try:
+        await dispatch_campaign_batch(campaign_id, limit=limit)
+    except Exception as e:
+        print(f"[Sequencer Background Error]: {e}")
+    finally:
+        conn = await get_db_connection()
+        try:
+            cur = await conn.execute(
+                "SELECT COUNT(*) as tot, (SELECT COUNT(*) FROM leads WHERE campaign_id = ? AND status = 'sent') as snt "
+                "FROM leads WHERE campaign_id = ?", (campaign_id, campaign_id))
+            r = await cur.fetchone()
+            tot = r["tot"] if r else 0
+            snt = r["snt"] if r else 0
+            new_status = "completed" if (tot > 0 and snt >= tot) else "ready"
+            await conn.execute("UPDATE campaigns SET status = ?, sent_count = ? WHERE id = ?", (new_status, snt, campaign_id))
+            await conn.commit()
+        finally:
+            await conn.close()

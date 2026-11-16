@@ -206,7 +206,7 @@ def followups(monkeypatch):
     async def inbox():
         return {"id": 1, "email": "me@x.com"}
 
-    async def send(inbox, to_email, subject, body, lead_id=None):
+    async def send(inbox, to_email, subject, body, lead_id=None, in_reply_to=None):
         bodies.append(body)
         return {"success": True}
 

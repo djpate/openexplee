@@ -104,6 +104,16 @@ async def get_thread_detail(lead_id: int):
         signature = f"\n{settings.sender_name}" if settings.sender_name else ""
         suggested_nudge = f"Hi {first_name},\n\n{cta}\n\nLooking forward to speaking,{signature}"
 
+        # Replies the inbox reader picked up, oldest first.
+        cur = await conn.execute(
+            "SELECT subject, body, intent, created_at FROM messages WHERE lead_id = ? AND direction = 'inbound' "
+            "ORDER BY id", (lead_id,))
+        inbound = [
+            {"direction": "inbound", "sender": lead.get("email"), "recipient": lead.get("sent_from_inbox") or "",
+             "subject": r["subject"], "body": r["body"], "intent": r["intent"], "timestamp": r["created_at"]}
+            for r in await cur.fetchall()
+        ]
+
         return {
             "lead": lead,
             "booking_url": booking_url,
@@ -119,7 +129,7 @@ async def get_thread_detail(lead_id: int):
                     "body": lead.get("personalized_body"),
                     "timestamp": lead.get("sent_at") or lead.get("created_at"),
                 }
-            ]
+            ] + inbound
         }
     finally:
         await conn.close()

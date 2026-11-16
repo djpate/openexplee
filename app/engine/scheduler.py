@@ -1,7 +1,11 @@
 import asyncio
 from app.config import settings
 from app.database import get_db_connection
-from app.engine.sequencer import get_next_available_inbox, in_send_window, send_single_email
+from app.engine.inbox_reader import poll_inboxes
+from app.engine.sequencer import (
+    compliance_ready, get_next_available_inbox, in_send_window, run_campaign_send, send_single_email,
+    sendable_count,
+)
 
 
 async def reset_daily_inbox_quotas() -> int:
@@ -22,7 +26,7 @@ async def reset_daily_inbox_quotas() -> int:
 
 async def process_due_followups(limit: int = 10) -> int:
     """Sends scheduled Day-3 / Day-7 follow-ups for leads that have not replied yet."""
-    if not in_send_window():
+    if not in_send_window() or not compliance_ready():
         return 0
     conn = await get_db_connection()
     try:
@@ -66,23 +70,75 @@ async def process_due_followups(limit: int = 10) -> int:
                 f"Feel free to reply anytime if this becomes a priority."
             )
 
-        res = await send_single_email(inbox, lead["email"], subj, body, lead_id=lead["id"])
+        # Thread it under the last email we sent this lead.
+        conn = await get_db_connection()
+        try:
+            row = await (await conn.execute(
+                "SELECT message_id FROM messages WHERE lead_id = ? AND direction = 'outbound' "
+                "AND message_id IS NOT NULL ORDER BY id DESC LIMIT 1", (lead["id"],))).fetchone()
+        finally:
+            await conn.close()
+        res = await send_single_email(inbox, lead["email"], subj, body, lead_id=lead["id"],
+                                      in_reply_to=row["message_id"] if row else None)
         if res["success"]:
             sent_count += 1
 
     return sent_count
 
 
+# Campaigns sending because of auto-send, so a tick never starts a second batch for one.
+_AUTO_TASKS: dict = {}
+
+
+async def auto_send_tick() -> list:
+    """Starts a background batch for each auto-send campaign that has qualified leads left, during
+    sending hours, while an inbox has daily quota. Returns the campaign ids started."""
+    if not in_send_window() or not compliance_ready():
+        return []
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute(
+            "SELECT id FROM campaigns WHERE auto_send = 1 AND COALESCE(status, '') NOT IN ('sending', 'discovering')")
+        ids = [r["id"] for r in await cur.fetchall()]
+    finally:
+        await conn.close()
+    started = []
+    for cid in ids:
+        task = _AUTO_TASKS.get(cid)
+        if task and not task.done():
+            continue
+        if not await get_next_available_inbox():
+            break
+        count = await sendable_count(cid)
+        if not count:
+            continue
+        conn = await get_db_connection()
+        try:
+            await conn.execute("UPDATE campaigns SET status = 'sending' WHERE id = ?", (cid,))
+            await conn.commit()
+        finally:
+            await conn.close()
+        _AUTO_TASKS[cid] = asyncio.create_task(run_campaign_send(cid, count))
+        started.append(cid)
+    return started
+
+
+async def scheduler_tick() -> None:
+    """One pass: reset quotas, read inboxes (so fresh replies stop follow-ups), follow-ups, auto-send."""
+    await reset_daily_inbox_quotas()
+    await poll_inboxes()
+    # One per tick (every 5 minutes), so follow-ups are spaced out too.
+    await process_due_followups(limit=1)
+    await auto_send_tick()
+
+
 async def run_scheduler_loop(interval_seconds: int = 300) -> None:
-    """Background loop for daily quota resets and automated follow-up sequences."""
+    """Background loop: quota resets, inbox reading, follow-ups and automatic sending."""
     while True:
         try:
-            await reset_daily_inbox_quotas()
-            # One per tick (every 5 minutes), so follow-ups are spaced out too.
-            await process_due_followups(limit=1)
+            await scheduler_tick()
         except asyncio.CancelledError:
             break
         except Exception as exc:
             print(f"[Scheduler] Background tick error: {exc}")
         await asyncio.sleep(interval_seconds)
-

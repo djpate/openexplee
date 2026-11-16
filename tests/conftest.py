@@ -26,3 +26,5 @@ def _send_window_always_open(monkeypatch):
     monkeypatch.setattr(settings, "send_window_start_hour", 0, raising=False)
     monkeypatch.setattr(settings, "send_window_end_hour", 24, raising=False)
     monkeypatch.setattr(settings, "send_weekdays_only", False, raising=False)
+    # Sending requires a postal address (CAN-SPAM); tests that check the guard clear it.
+    monkeypatch.setattr(settings, "postal_address", "1 Test St, Tampa, FL 33602", raising=False)
