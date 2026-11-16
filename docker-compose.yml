@@ -1,26 +1,32 @@
-version: "3.8"
-
 services:
   openexplee:
     build: .
+    image: openexplee:local
     container_name: openexplee
-    ports:
-      - "8000:8000"
+    # All app settings (API keys, LLM provider, booking URL, ...) come from .env
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - HOST=0.0.0.0
-      - PORT=8000
-      - DATABASE_PATH=/app/data/openexplee.db
-      - DEFAULT_LLM_PROVIDER=${DEFAULT_LLM_PROVIDER:-gemini}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - SERPER_API_KEY=${SERPER_API_KEY}
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATABASE_PATH: /app/data/openexplee.db
+    # Published on all interfaces (LAN-reachable). The app has no authentication
+    # and stores SMTP credentials and API keys — don't expose this to the internet.
+    ports:
+      - "${OPENEXPLEE_PORT:-8000}:8000"
+    extra_hosts:
+      # Lets the container reach services on the host (e.g. Ollama on :11434)
+      - "host.docker.internal:host-gateway"
     volumes:
       - openexplee_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
 volumes:
   openexplee_data:
-
