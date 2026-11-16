@@ -19,16 +19,9 @@ PERSON_TITLE_REGEX = re.compile(
 
 
 async def _get_suppressed_domains() -> Set[str]:
-    """Loads suppressed company domains from SQLite so they are never re-targeted."""
-    conn = await get_db_connection()
-    try:
-        cur = await conn.execute("SELECT LOWER(value) AS val FROM suppression_list WHERE entry_type = 'domain'")
-        rows = await cur.fetchall()
-        return {r["val"].lstrip("@") for r in rows}
-    except Exception:
-        return set()
-    finally:
-        await conn.close()
+    """Thin alias kept for existing call sites; logic lives in company_pool."""
+    from app.engine.company_pool import suppressed_domains
+    return await suppressed_domains()
 
 
 async def _extract_people_with_llm(domain: str, text: str, job_titles: Optional[List[str]] = None) -> List[Dict[str, str]]:
