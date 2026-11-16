@@ -40,12 +40,13 @@ async def _row(cid):
         await conn.close()
 
 
-async def _make(status="draft", plan=None, batch_size=50):
+async def _make(status="draft", plan=None, batch_size=50, release=None):
+    """release set = a search has completed for this plan (pool built from that release)."""
     conn = await get_db_connection()
     try:
         cur = await conn.execute(
-            "INSERT INTO campaigns (name, icp_prompt, value_proposition, status, search_plan, batch_size) "
-            "VALUES ('c', 'dentists', 'vp', ?, ?, ?)", (status, plan, batch_size))
+            "INSERT INTO campaigns (name, icp_prompt, value_proposition, status, search_plan, batch_size, "
+            "overture_release) VALUES ('c', 'dentists', 'vp', ?, ?, ?, ?)", (status, plan, batch_size, release))
         await conn.commit()
         return cur.lastrowid
     finally:
@@ -71,9 +72,16 @@ async def test_auto_send_dispatches_created_leads(db, calls):
 
 
 async def test_discover_does_not_search_again_when_plan_exists(db, calls):
-    cid = await _make(plan='{"x": 1}')
+    cid = await _make(plan='{"x": 1}', release="2026-10-21.0")
     await campaigns.run_discovery_task(cid)
     assert calls["refresh"] == [] and len(calls["batch"]) == 1
+
+
+async def test_discover_resumes_search_when_plan_stored_but_fetch_never_completed(db, calls):
+    # The plan is stored before the fetch; a failed or interrupted first fetch leaves no release.
+    cid = await _make(status="error", plan='{"x": 1}')
+    await campaigns.run_discovery_task(cid)
+    assert calls["refresh"] == [cid] and len(calls["batch"]) == 1
 
 
 async def test_refresh_endpoint_searches_but_creates_no_leads(db, calls):
@@ -199,11 +207,11 @@ async def _set_message(cid, msg):
 
 
 async def test_successful_discover_with_plan_clears_stale_message(db, calls):
-    cid = await _make(status="error", plan='{"x": 1}')
+    cid = await _make(status="error", plan='{"x": 1}', release="2026-10-21.0")
     await _set_message(cid, "HTTP 503 from s3")
     await campaigns.run_discovery_task(cid)
     row = await _row(cid)
-    assert row["status"] == "ready" and row["discovery_message"] is None
+    assert row["status"] == "ready" and row["discovery_message"] is None and calls["refresh"] == []
 
 
 async def test_successful_first_discover_shows_new_search_messages(db, calls, monkeypatch):

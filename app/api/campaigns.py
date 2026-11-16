@@ -118,7 +118,8 @@ async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
         conn = await get_db_connection()
         try:
             cur = await conn.execute(
-                "SELECT search_plan, batch_size, value_proposition FROM campaigns WHERE id = ?", (campaign_id,))
+                "SELECT search_plan, overture_release, batch_size, value_proposition FROM campaigns WHERE id = ?",
+                (campaign_id,))
             camp = await cur.fetchone()
         finally:
             await conn.close()
@@ -126,7 +127,9 @@ async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
             return
         # A success replaces any stale warning or error with this run's search messages.
         message = None
-        if not camp["search_plan"]:
+        # No completed search yet: no plan, or the plan was stored but its first fetch
+        # failed or was interrupted (the release is set only when a fetch completes).
+        if not camp["search_plan"] or not camp["overture_release"]:
             message = _joined(await refresh_campaign_pool(campaign_id))
         res = await process_next_batch(
             campaign_id, camp["batch_size"] or settings.discovery_batch_size, camp["value_proposition"] or "")

@@ -224,11 +224,13 @@ async def test_plan_stored_before_fetch_and_reused_after_fetch_failure(db, world
     with pytest.raises(OvertureError):
         await refresh_campaign_pool(cid)
     row = await _campaign_row(cid)
-    assert plan_from_json(row["search_plan"]) == state["plan"] and row["overture_release"] == "local"
+    assert plan_from_json(row["search_plan"]) == state["plan"]
+    assert row["overture_release"] is None  # set only once a fetch completes
 
     monkeypatch.setattr(discovery, "fetch_places", real_fetch)
     r = await refresh_campaign_pool(cid)
     assert calls["plan"] == 1 and r["inserted"] == 1
+    assert (await _campaign_row(cid))["overture_release"] == "local"
 
 
 async def test_first_fetch_sees_plan_already_stored(db, world, monkeypatch):
