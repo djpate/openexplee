@@ -75,6 +75,23 @@ async def test_non_local_with_serper_key_adds_web_candidates(world, monkeypatch)
     assert not any("map data" in m for m in msgs)
 
 
+async def test_non_local_with_categories_still_runs_overture_no_key(world):
+    calls, state, _ = world
+    state["plan"] = SearchPlan(["dental_clinic"], [AreaSpec("Tampa", "locality", 1, "US-FL", "US")], False, [])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert [c["domain"] for c in cands] == ["tampadental.com"]
+    assert "Open map data covers it poorly" in " ".join(msgs) and calls["bing"] == []
+
+
+async def test_non_local_with_categories_and_key_returns_both(world, monkeypatch):
+    calls, state, _ = world
+    monkeypatch.setattr(settings, "serper_api_key", "k")
+    state["plan"] = SearchPlan(["dental_clinic"], [AreaSpec("Tampa", "locality", 1, "US-FL", "US")], False, [])
+    _, cands, msgs, _ = await search_companies_for_icp("x")
+    assert {c["domain"] for c in cands} == {"tampadental.com", "acme.io"} and calls["bing"] == []
+    assert not any("map data" in m for m in msgs)
+
+
 async def test_search_web_candidates_without_key_is_empty(world):
     assert await search_web_candidates("x") == []
 

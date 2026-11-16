@@ -384,7 +384,7 @@ async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan]):
     messages = list(plan.messages)
     places: List[Dict[str, Any]] = []
     web: List[Dict[str, Any]] = []
-    if plan.is_local_business:
+    if plan.categories:
         areas, unresolved = await asyncio.to_thread(resolve_areas, plan.areas, release)
         if unresolved:
             messages.append("Couldn't find these places in the map data: " + ", ".join(unresolved))
@@ -393,10 +393,11 @@ async def _search_parts(icp_prompt: str, plan: Optional[SearchPlan]):
         places = await asyncio.to_thread(
             fetch_places, release, plan.categories, areas, settings.overture_min_confidence
         )
-    elif settings.serper_api_key:
-        web = await search_web_candidates(icp_prompt)
-    else:
-        messages.append(NO_SERPER_MESSAGE)
+    if not plan.is_local_business:
+        if settings.serper_api_key:
+            web = await search_web_candidates(icp_prompt)
+        else:
+            messages.append(NO_SERPER_MESSAGE)
     return plan, places, web, messages, release
 
 
