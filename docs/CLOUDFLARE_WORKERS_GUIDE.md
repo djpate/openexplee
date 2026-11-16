@@ -27,7 +27,7 @@ OpenExplee supports two Cloudflare Worker integrations for email sending and rep
    npx wrangler secret put OPENEXPLEE_WEBHOOK_URL
    # Example: https://your-openexplee-host/api/cloudflare/inbound-webhook
    ```
-6. In the Cloudflare dashboard under **Email Routing**, bind incoming addresses on your domain to the `openexplee-cf-mailer` Worker so replies forward to `vikash@viktron.ai`.
+6. In the Cloudflare dashboard under **Email Routing**, bind incoming addresses on your domain to the `openexplee-cf-mailer` Worker so replies forward to your real inbox (set `FORWARD_TO_EMAIL` in `wrangler.jsonc`).
 7. Open OpenExplee &rarr; **Inboxes & Domains**, choose **Cloudflare Email Worker (send_email)**, enter the deployed Worker URL and `WORKER_AUTH_TOKEN`, then click **Test SMTP**.
 
 ---

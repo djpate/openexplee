@@ -13,7 +13,7 @@ class ManualReplyRequest(BaseModel):
     lead_id: int
     body: str
     subject: Optional[str] = None
-    cc_email: Optional[str] = "vikash@viktron.ai"
+    cc_email: Optional[str] = None  # defaults to settings.reply_cc_email
 
 
 class UpdateThreadTagRequest(BaseModel):
@@ -62,7 +62,7 @@ async def list_mailbox_threads(folder: str = "all", search: Optional[str] = None
                 "status": d.get("status"),
                 "is_hot_lead": bool(d.get("is_hot_lead")),
                 "campaign_name": d.get("campaign_name"),
-                "sent_from_inbox": d.get("sent_from_inbox") or "outreach@getagentirl.online",
+                "sent_from_inbox": d.get("sent_from_inbox") or "",
                 "sent_at": d.get("sent_at") or d.get("created_at"),
                 "subject": d.get("personalized_subject") or "Outreach Inquiry",
                 "snippet": (d.get("personalized_body") or "")[:120].replace("\n", " "),
@@ -92,26 +92,28 @@ async def get_thread_detail(lead_id: int):
             raise HTTPException(status_code=404, detail="Thread not found")
         lead = dict(row)
 
-        booking_url = settings.booking_url or "https://cal.viktron.ai/vikash/15min"
+        booking_url = settings.booking_url
 
         # Generate intelligent contextual nudge copy (Explee-style "Nudge Tyler?")
         first_name = lead.get("first_name") or (lead.get("contact_name", "").split()[0] if lead.get("contact_name") else "there")
-        suggested_nudge = (
-            f"Hi {first_name},\n\n"
-            f"Sounds good. Easiest is to grab a quick 15-minute slot that suits you here:\n"
-            f"{booking_url}\n\n"
-            "Looking forward to speaking,\n"
-            "Alex | AgentIRL"
+        cta = (
+            f"Sounds good. Easiest is to grab a quick 15-minute slot that suits you here:\n{booking_url}"
+            if booking_url
+            else "Sounds good. What does your calendar look like this week for a quick 15-minute call?"
         )
+        signature = f"\n{settings.sender_name}" if settings.sender_name else ""
+        suggested_nudge = f"Hi {first_name},\n\n{cta}\n\nLooking forward to speaking,{signature}"
 
         return {
             "lead": lead,
             "booking_url": booking_url,
+            "sender_name": settings.sender_name,
+            "reply_cc_email": settings.reply_cc_email,
             "suggested_nudge": suggested_nudge,
             "messages": [
                 {
                     "direction": "outbound",
-                    "sender": lead.get("sent_from_inbox") or "outreach@getagentirl.online",
+                    "sender": lead.get("sent_from_inbox") or "",
                     "recipient": lead.get("email"),
                     "subject": lead.get("personalized_subject"),
                     "body": lead.get("personalized_body"),
@@ -126,8 +128,8 @@ async def get_thread_detail(lead_id: int):
 @router.post("/reply")
 async def send_manual_reply(req: ManualReplyRequest):
     """
-    Sends a custom response or follow-up email directly to the prospect via VPS Relay,
-    automatically CCing vikash@viktron.ai and setting Reply-To: vikash@viktron.ai.
+    Sends a custom response or follow-up email directly to the prospect via the first
+    active inbox, CCing `cc_email` (or settings.reply_cc_email when not given).
     """
     conn = await get_db_connection()
     try:
@@ -145,8 +147,9 @@ async def send_manual_reply(req: ManualReplyRequest):
 
         subject = req.subject or f"Re: {lead.get('personalized_subject') or 'quick question'}"
         inbox_copy = dict(inbox)
-        if req.cc_email:
-            inbox_copy["cc_email"] = req.cc_email
+        cc_email = req.cc_email if req.cc_email is not None else settings.reply_cc_email
+        if cc_email:
+            inbox_copy["cc_email"] = cc_email
 
         send_res = await send_single_email(
             inbox=inbox_copy,

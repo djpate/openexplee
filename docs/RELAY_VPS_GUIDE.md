@@ -40,7 +40,7 @@ Use Hyvor Relay on a \$5–\$6/month Linux VPS when you want unlimited outbound 
    * **SMTP Port:** `587`
    * **SMTP Username:** `relay` (any non-empty string; Relay authenticates using the password token)
    * **Password:** Paste your **Hyvor Relay API Key**
-   * **Reply-To Address:** `vikash@viktron.ai`
-   * **Master Notification CC Email:** `vikash@viktron.ai`
+   * **Reply-To Address:** `you@yourcompany.com`
+   * **Master Notification CC Email:** `you@yourcompany.com`
 4. Click **Add & Authenticate Inbox**, then click **Test SMTP**.
 

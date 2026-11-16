@@ -28,14 +28,23 @@ class Settings(BaseSettings):
     thor_ollama_model: str = "llama3.2:3b"
     thor_cdp_url: str = "http://100.114.48.60:9222"
 
-    # Booking Link (Self-Hosted Cal.com on VPS)
-    booking_url: str = "https://cal.viktron.ai/vikash/15min"
+    # Booking link (e.g. your Cal.com page) used in outreach CTAs. Blank = no link.
+    booking_url: str = ""
+
+    # Sender identity
+    sender_name: str = ""  # sign-off name on AI-written emails
+    forward_to_email: str = ""  # your real inbox: Cloudflare catch-all forwarding + DMARC reports
+    reply_cc_email: str = ""  # CC'd on replies sent from the Mailbox. Blank = no extra CC.
+
+    # Compliance footer added under every cold email and follow-up
+    opt_out_line: str = 'Not the right fit? Just reply "unsubscribe" and I won\'t email you again.'
+    postal_address: str = ""
 
     # Search & Enrichment
     serper_api_key: Optional[str] = None
 
     # Sending & Deliverability Safeguards
-    protected_primary_domains: str = "viktron.ai"
+    protected_primary_domains: str = ""  # your main domain(s), comma-separated; never send from these
     max_daily_sends_per_inbox: int = 35
     min_delay_seconds: int = 120
     max_delay_seconds: int = 300
