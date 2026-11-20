@@ -84,6 +84,10 @@ _BOOKING_LINK_WORDS = ("book", "reserv", "schedul", "ticket", "appointment")
 _NOT_BOOKING_HOSTS = ("facebook.", "instagram.", "twitter.", "x.com", "tiktok.", "youtube.", "linkedin.",
                       "pinterest.", "google.", "goo.gl", "apple.com", "yelp.", "tripadvisor.", "wa.me",
                       "whatsapp.", "gmpg.org", "w.org", "wordpress.org")
+# A page of their own whose path names booking (/book-now, /reservations, /register-online...). Its
+# system often loads with scripts we can't see, so it counts as taking bookings online. Pages the
+# scraper also reads for "order", "menu", "rates" or a class "schedule" don't count.
+_BOOKING_PATH = re.compile(r"(?i)book|reserv|ticket|appointment|regist|enrol|sign[-_]?up")
 _LINK = re.compile(r"""(?is)<(a|form|iframe)\b[^>]*?(?:href|action|src)\s*=\s*["'](https?://[^"']+)["'][^>]*>(.*?)(?:</\1>|$)""")
 
 SITE_BUILDERS = [
@@ -174,11 +178,15 @@ def describe_site_facts(facts: Dict[str, Any]) -> List[str]:
     tools = facts.get("booking_tools") or []
     external = facts.get("external_booking_hosts") or []
     booking_pages = facts.get("booking_pages") or []
+    own_booking = [u for u in booking_pages if _BOOKING_PATH.search(urlparse(u).path or "")]
     if tools:
         lines.append(f"They already use {', '.join(tools)} for online booking, scheduling or ordering.")
     elif external:
         lines.append(f"Their booking or ticket links go to another site ({', '.join(external)}), so they already "
                      "take bookings online there.")
+    elif own_booking:
+        lines.append(f"They have their own booking page ({urlparse(own_booking[0]).path}), so they already take "
+                     "bookings or booking requests online. We couldn't see which system it uses.")
     else:
         where = f", including their {urlparse(booking_pages[0]).path} page" if booking_pages else ""
         lines.append(f"We didn't find an online booking or scheduling tool on the pages we checked{where}, "

@@ -140,6 +140,21 @@ async def test_rate_leads_fills_unrated_and_rerates_when_asked(db, llm):
     assert "We build websites and booking tools." in calls[0]["prompt"]
 
 
+async def test_rating_describes_stored_site_facts_in_the_current_wording(db, llm):
+    import json
+    from tests.test_lazy_drafting import STALE_FACTS
+    calls, _ = llm
+    cid = await _campaign(db)
+    lid = await _lead(db, cid, "a.com")
+    async with aiosqlite.connect(db) as c:
+        await c.execute("UPDATE leads SET site_facts = ? WHERE id = ?", (json.dumps(STALE_FACTS), lid))
+        await c.commit()
+    assert (await fit.rate_leads([lid]))["rated"] == 1
+    p = calls[0]["prompt"]
+    assert "didn't find" not in p
+    assert "own booking page (/book-now)" in p
+
+
 # ---------- discovery rates new leads ----------
 
 async def test_new_leads_are_rated_during_discovery(monkeypatch):

@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from app.config import settings
 from app.database import get_db_connection
 from app.engine.llm import call_llm_json
+from app.engine.site_check import describe_site_facts
 
 DEFAULT_MIN_FIT = 3
 
@@ -68,11 +69,12 @@ Respond only with JSON: {{"score": 1, "reason": "..."}}"""
 
 
 def _fact_lines(raw: Optional[str]) -> List[str]:
+    """Stored website facts in the current wording (lines stored with them may be outdated)."""
     try:
         facts = json.loads(raw) if raw else None
     except ValueError:
         return []
-    return facts.get("lines") or [] if isinstance(facts, dict) else []
+    return describe_site_facts(facts) if isinstance(facts, dict) else []
 
 
 async def ratable_lead_ids(lead_ids: Iterable[int], overwrite: bool = False) -> List[int]:

@@ -12,7 +12,7 @@ from app.database import get_db_connection
 from app.engine.copywriter import generate_cold_email
 from app.engine.fit import qualified_sql
 from app.engine.scraper import scrape_company_website
-from app.engine.site_check import analyze_site
+from app.engine.site_check import analyze_site, describe_site_facts
 
 # Leads being drafted right now, by lead id -> campaign id. Overlapping requests skip these.
 _IN_FLIGHT: Dict[int, int] = {}
@@ -114,7 +114,8 @@ async def draft_lead(lead_id: int, overwrite: bool = False) -> str:
             company_summary=summary,
             value_proposition=lead.get("value_proposition") or "",
             instructions=lead.get("draft_instructions"),
-            site_facts=(facts or {}).get("lines"),
+            # In the current wording: lines stored with older facts may be outdated.
+            site_facts=describe_site_facts(facts) if facts else None,
         )
         subject, body = (draft or {}).get("subject"), (draft or {}).get("body")
         if not subject or not body:
