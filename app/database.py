@@ -187,6 +187,8 @@ async def init_db():
             ("campaigns", "auto_send", "INTEGER DEFAULT 0"),
             ("campaigns", "autopilot_day", "TEXT"),
             ("campaigns", "autopilot_batches", "INTEGER DEFAULT 0"),
+            # How well a found business matches the campaign's target: 2 yes, 1 maybe, 0 no; NULL unscored.
+            ("campaign_companies", "target_match", "INTEGER"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")

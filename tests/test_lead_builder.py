@@ -7,7 +7,7 @@ import pytest
 
 from app.config import settings
 from app.database import get_db_connection
-from app.engine import lead_builder
+from app.engine import lead_builder, target_screen
 from app.engine.company_pool import normalize_domain, save_pool
 from app.engine.lead_builder import enrich_company, pick_lead_email, process_next_batch
 
@@ -59,7 +59,7 @@ def test_no_contact_fallback():
 # ---------- fakes for the network and LLM ----------
 
 class Fakes:
-    """Stands in for the scraper, SMTP, people extraction and email guessing."""
+    """Stands in for the scraper, SMTP, people extraction, email guessing, fit rating and target scoring."""
 
     def __init__(self, monkeypatch, scrape_delay=0.0):
         self.sites = {}    # domain -> overrides for the scrape result
@@ -73,6 +73,8 @@ class Fakes:
         monkeypatch.setattr(lead_builder, "_extract_people_with_llm", self.extract)
         monkeypatch.setattr(lead_builder, "enrich_person_email", self.enrich_person)
         monkeypatch.setattr(lead_builder, "rate_lead_fit", self.rate)
+        # Target scoring scores nothing by default (every business a maybe); tests of it replace this.
+        monkeypatch.setattr(target_screen, "call_llm_json", self.no_scores)
 
     async def scrape(self, url):
         domain = normalize_domain(url)
@@ -91,6 +93,9 @@ class Fakes:
     async def extract(self, domain, text, job_titles=None):
         self.extracted.append((domain, text))
         return self.people.get(domain, [])
+
+    async def no_scores(self, prompt, provider=None, api_key=None, model=None):
+        return {}
 
     async def rate(self, company_name, company_domain, summary, site_facts, value_proposition, target=""):
         self.rated.append((company_domain, value_proposition, target))

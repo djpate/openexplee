@@ -1003,13 +1003,14 @@
       const skipped = c.pool_skipped || 0;
       const pending = c.pool_pending || 0;
       const found = c.pool_total || 0;
+      const offTarget = c.pool_off_target || 0;
       const processed = done + skipped;
       const batch = c.batch_size || 50;
       return `
         <div class="text-xs text-slate-400 mt-2 space-y-0.5">
           <div>Searching: <span class="text-slate-200">${cats}</span></div>
           <div>In: <span class="text-slate-200">${areas}</span></div>
-          <div>${found} companies found &middot; ${processed} processed (${done} leads, ${skipped} skipped) &middot; ${pending} in reserve</div>
+          <div>${found} companies found${offTarget ? ` &middot; ${offTarget} don't match the target` : ''} &middot; ${processed} processed (${done} leads, ${skipped} skipped) &middot; ${pending} in reserve</div>
           ${notes}
           <div class="flex gap-2 pt-1">
             <button onclick="discoverCampaign(${c.id})" ${busy ? 'disabled' : ''} class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition disabled:opacity-50">Find next ${batch} leads</button>
