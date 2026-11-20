@@ -7,11 +7,11 @@ from app.config import settings
 from app.engine import drafting, fit, sequencer
 
 
-async def _campaign(db, min_fit=3, vp="We build websites and booking tools."):
+async def _campaign(db, min_fit=3, vp="We build websites and booking tools.", icp="Dance studios in Tampa"):
     async with aiosqlite.connect(db) as c:
         cid = (await c.execute(
-            "INSERT INTO campaigns (name, icp_prompt, value_proposition, min_fit_score) VALUES ('C', 'i', ?, ?)",
-            (vp, min_fit))).lastrowid
+            "INSERT INTO campaigns (name, icp_prompt, value_proposition, min_fit_score) VALUES ('C', ?, ?, ?)",
+            (icp, vp, min_fit))).lastrowid
         await c.commit()
         return cid
 
@@ -56,6 +56,13 @@ async def test_rating_uses_the_bulk_model_and_judges_against_the_offer(llm):
     p = calls[0]["prompt"]
     assert "We build booking tools." in p and "They already use Mindbody" in p
     assert "1 to 5" in p and "use 3" in p
+
+
+async def test_rating_judges_against_the_campaign_target(llm):
+    calls, _ = llm
+    await fit.rate_lead_fit("Hill Valley Suites", "hillvalleysuites.com", "Office suites for lease.", [],
+                            "We build booking tools.", "Independent escape rooms in Tampa Bay")
+    assert "Independent escape rooms in Tampa Bay" in calls[0]["prompt"]
 
 
 @pytest.mark.parametrize("bad", [None, "nope", {"score": 9, "reason": "x"}, {"score": "high"}, {"reason": "x"}])
@@ -138,6 +145,7 @@ async def test_rate_leads_fills_unrated_and_rerates_when_asked(db, llm):
     assert (await fit.rate_leads([old], overwrite=True))["rated"] == 1
     assert await _col(db, "SELECT fit_reason FROM leads WHERE id=?", old) == "Needs booking."
     assert "We build websites and booking tools." in calls[0]["prompt"]
+    assert all("Dance studios in Tampa" in c["prompt"] for c in calls)
 
 
 async def test_rating_describes_stored_site_facts_in_the_current_wording(db, llm):
@@ -170,8 +178,8 @@ async def test_new_leads_are_rated_during_discovery(monkeypatch):
     async def people(domain, text, job_titles=None):
         return []
 
-    async def rate(company_name, company_domain, summary, site_facts, value_proposition):
-        assert value_proposition == "our offer" and site_facts
+    async def rate(company_name, company_domain, summary, site_facts, value_proposition, target):
+        assert value_proposition == "our offer" and target == "our target" and site_facts
         return 4, "No online booking visible."
 
     monkeypatch.setattr(lead_builder, "scrape_company_website", scrape)
@@ -180,7 +188,7 @@ async def test_new_leads_are_rated_during_discovery(monkeypatch):
     monkeypatch.setattr(lead_builder, "rate_lead_fit", rate)
     lead = (await lead_builder.enrich_company(
         {"id": 1, "campaign_id": 1, "domain": "a.com", "website_url": "https://a.com", "name": "A",
-         "emails": "[]", "phones": "[]"}, "our offer"))["lead"]
+         "emails": "[]", "phones": "[]"}, "our offer", "our target"))["lead"]
     assert (lead["fit_score"], lead["fit_reason"]) == (4, "No online booking visible.")
 
 

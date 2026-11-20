@@ -66,7 +66,7 @@ class Fakes:
         self.smtp = {}     # email -> verification status (default "risky")
         self.people = {}   # domain -> extracted people
         self.guess = {}    # domain -> enrich_person_email result
-        self.scraped, self.verified, self.extracted, self.guessed = [], [], [], []
+        self.scraped, self.verified, self.extracted, self.guessed, self.rated = [], [], [], [], []
         self.scrape_delay = scrape_delay
         monkeypatch.setattr(lead_builder, "scrape_company_website", self.scrape)
         monkeypatch.setattr(lead_builder, "verify_email_smtp", self.verify)
@@ -92,7 +92,8 @@ class Fakes:
         self.extracted.append((domain, text))
         return self.people.get(domain, [])
 
-    async def rate(self, company_name, company_domain, summary, site_facts, value_proposition):
+    async def rate(self, company_name, company_domain, summary, site_facts, value_proposition, target=""):
+        self.rated.append((company_domain, value_proposition, target))
         return None, ""
 
     async def enrich_person(self, first, last, domain):
@@ -311,6 +312,14 @@ async def _rows(cid):
     return {r["domain"]: (r["status"], r["skip_reason"]) for r in rows}
 
 
+async def test_batch_rates_leads_against_the_offer_and_the_target(db, monkeypatch):
+    f = Fakes(monkeypatch)
+    cid = await _campaign()
+    await _pool(cid, ["a.com"])
+    await process_next_batch(cid, 1, "our offer", "dentists in Tampa")
+    assert f.rated == [("a.com", "our offer", "dentists in Tampa")]
+
+
 async def test_batch_marks_rows_and_counts(db, monkeypatch):
     f = Fakes(monkeypatch)
     f.sites["d.com"] = {"error": "HTTP 503", "found_emails": [], "content_summary": ""}
@@ -352,11 +361,11 @@ async def test_progress_written_as_each_row_finishes(db, monkeypatch):
     seen = []
     real = lead_builder.enrich_company
 
-    async def watching(company, value_prop):
+    async def watching(company, value_prop, target=""):
         camp = (await _fetch("SELECT total_leads FROM campaigns WHERE id = ?", cid))[0]
         done = await _fetch("SELECT COUNT(*) AS n FROM campaign_companies WHERE status = 'done'")
         seen.append((camp["total_leads"], done[0]["n"]))
-        return await real(company, value_prop)
+        return await real(company, value_prop, target)
 
     monkeypatch.setattr(lead_builder, "enrich_company", watching)
     await process_next_batch(cid, 3, "vp")
@@ -373,9 +382,9 @@ async def test_pool_counters_refreshed_as_each_row_finishes(db, monkeypatch):
     seen = []
     real = lead_builder.enrich_company
 
-    async def watching(company, value_prop):
+    async def watching(company, value_prop, target=""):
         seen.append((await _fetch("SELECT pool_pending FROM campaigns WHERE id = ?", cid))[0]["pool_pending"])
-        return await real(company, value_prop)
+        return await real(company, value_prop, target)
 
     monkeypatch.setattr(lead_builder, "enrich_company", watching)
     out = await process_next_batch(cid, 3, "vp")
@@ -418,7 +427,7 @@ async def test_concurrency_cap(db, monkeypatch):
     await _pool(cid, [f"d{i}.com" for i in range(20)])
     in_flight, peak = 0, 0
 
-    async def fake_enrich(company, value_prop):
+    async def fake_enrich(company, value_prop, target=""):
         nonlocal in_flight, peak
         in_flight += 1
         peak = max(peak, in_flight)
@@ -441,9 +450,9 @@ async def test_overlapping_batches_never_double_process(db, monkeypatch, size_a,
     enrich_calls = Counter()
     real = lead_builder.enrich_company
 
-    async def counting(company, value_prop):
+    async def counting(company, value_prop, target=""):
         enrich_calls[company["domain"]] += 1
-        return await real(company, value_prop)
+        return await real(company, value_prop, target)
 
     monkeypatch.setattr(lead_builder, "enrich_company", counting)
     a, b = await asyncio.gather(process_next_batch(cid, size_a, "vp"), process_next_batch(cid, size_b, "vp"))
@@ -507,10 +516,10 @@ async def test_unexpected_error_returns_row_to_pending(db, monkeypatch, capsys):
     await _pool(cid, ["a.com", "boom.com"])
     real = lead_builder.enrich_company
 
-    async def flaky(company, value_prop):
+    async def flaky(company, value_prop, target=""):
         if company["domain"] == "boom.com":
             raise RuntimeError("llm exploded")
-        return await real(company, value_prop)
+        return await real(company, value_prop, target)
 
     monkeypatch.setattr(lead_builder, "enrich_company", flaky)
     out = await process_next_batch(cid, 10, "vp")

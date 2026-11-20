@@ -18,8 +18,8 @@ def calls(monkeypatch):
         c["refresh"].append(cid)
         return {"inserted": 0, "pool_total": 0, "messages": []}
 
-    async def fake_batch(cid, size, vp):
-        c["batch"].append((cid, size, vp))
+    async def fake_batch(cid, size, vp, target):
+        c["batch"].append((cid, size, vp, target))
         return {"processed": 3, "leads": 2, "skipped": 1, "lead_ids": [1, 2]}
 
     monkeypatch.setattr(campaigns, "refresh_campaign_pool", fake_refresh)
@@ -56,7 +56,7 @@ async def _client():
 async def test_create_runs_search_then_one_batch(db, calls):
     cid = await _make()
     await campaigns.run_discovery_task(cid)
-    assert calls["refresh"] == [cid] and calls["batch"] == [(cid, 50, "vp")]
+    assert calls["refresh"] == [cid] and calls["batch"] == [(cid, 50, "vp", "dentists")]
     assert (await _row(cid))["status"] == "ready"
 
 
@@ -105,7 +105,7 @@ async def test_plan_error_message_shown(db, calls, monkeypatch):
 
 
 async def test_unexpected_failure_message(db, calls, monkeypatch):
-    async def boom(cid, size, vp):
+    async def boom(cid, size, vp, target):
         raise KeyError("x")
     monkeypatch.setattr(campaigns, "process_next_batch", boom)
     cid = await _make(plan="{}")
@@ -174,7 +174,7 @@ async def test_concurrent_requests_only_one_wins(db, calls, path, monkeypatch):
         await asyncio.sleep(0.3)
         return {"inserted": 0, "pool_total": 0, "messages": []}
 
-    async def slow_batch(cid, size, vp):
+    async def slow_batch(cid, size, vp, target):
         await asyncio.sleep(0.3)
         return {"processed": 0, "leads": 0, "skipped": 0, "lead_ids": []}
 
