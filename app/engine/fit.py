@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from app.config import settings
 from app.database import get_db_connection
 from app.engine.llm import call_llm_json
+from app.engine.site_check import describe_site_facts
 
 DEFAULT_MIN_FIT = 3
 
@@ -35,10 +36,15 @@ def rating_count(campaign_id: int) -> int:
 
 
 async def rate_lead_fit(company_name: str, company_domain: str, summary: str,
-                        site_facts: Optional[List[str]], value_proposition: str) -> Tuple[Optional[int], str]:
-    """Returns (score 1-5, one-sentence reason), or (None, "") if the model gave nothing usable."""
+                        site_facts: Optional[List[str]], value_proposition: str,
+                        target: str = "") -> Tuple[Optional[int], str]:
+    """Returns (score 1-5, one-sentence reason), or (None, "") if the model gave nothing usable.
+    `target` is the campaign's description of who it's for: other kinds of business score 1."""
     facts = "\n".join(f"- {f}" for f in (site_facts or []) if f) or "- (no website facts available)"
     prompt = f"""You're qualifying a prospect for a cold outreach campaign.
+
+Who this campaign is for:
+{target or "(not described)"}
 
 What we offer:
 {value_proposition or "(not described)"}
@@ -51,6 +57,9 @@ From their website: {summary or "(nothing available)"}
 Rate from 1 to 5 how much this business likely needs what we offer:
 5 = a clear gap our offer fills; 4 = likely useful; 3 = unclear or not enough information;
 2 = they mostly have this already; 1 = not a fit at all.
+If the text above shows they're clearly not the kind of business this campaign is for (a different
+type of business, or a chain or franchise location when it's for independent businesses), rate 1
+whatever their website shows.
 Base the rating only on the facts and text above. If they're thin, use 3: don't guess.
 Give the reason in 15 words or fewer: the deciding fact, without caveats.
 
@@ -68,11 +77,12 @@ Respond only with JSON: {{"score": 1, "reason": "..."}}"""
 
 
 def _fact_lines(raw: Optional[str]) -> List[str]:
+    """Stored website facts in the current wording (lines stored with them may be outdated)."""
     try:
         facts = json.loads(raw) if raw else None
     except ValueError:
         return []
-    return facts.get("lines") or [] if isinstance(facts, dict) else []
+    return describe_site_facts(facts) if isinstance(facts, dict) else []
 
 
 async def ratable_lead_ids(lead_ids: Iterable[int], overwrite: bool = False) -> List[int]:
@@ -110,8 +120,9 @@ async def rate_lead(lead_id: int, overwrite: bool = False) -> str:
         conn = await get_db_connection()
         try:
             cur = await conn.execute(
-                "SELECT l.*, (SELECT value_proposition FROM campaigns c WHERE c.id = l.campaign_id) AS value_proposition "
-                f"FROM leads l WHERE l.id = ?{'' if overwrite else ' AND l.fit_score IS NULL'}", (lead_id,))
+                "SELECT l.*, c.value_proposition, c.icp_prompt FROM leads l "
+                "LEFT JOIN campaigns c ON c.id = l.campaign_id "
+                f"WHERE l.id = ?{'' if overwrite else ' AND l.fit_score IS NULL'}", (lead_id,))
             row = await cur.fetchone()
         finally:
             await conn.close()
@@ -121,7 +132,8 @@ async def rate_lead(lead_id: int, overwrite: bool = False) -> str:
         _IN_FLIGHT[lead_id] = lead["campaign_id"]
         score, reason = await rate_lead_fit(
             lead.get("company_name") or lead.get("company_domain") or "", lead.get("company_domain") or "",
-            lead.get("company_summary") or "", _fact_lines(lead.get("site_facts")), lead.get("value_proposition") or "")
+            lead.get("company_summary") or "", _fact_lines(lead.get("site_facts")), lead.get("value_proposition") or "",
+            lead.get("icp_prompt") or "")
         if score is None:
             return "failed"
         conn = await get_db_connection()

@@ -33,15 +33,30 @@ def test_detects_booking_tool_builder_mobile_https_and_real_copyright_year():
     assert facts["copyright_year"] == 2019  # not 2015 from the CSS comment
 
 
-def test_booking_page_without_a_known_tool_is_reported_hedged():
+def test_a_booking_page_means_they_already_take_bookings_even_when_the_tool_is_unknown():
     facts = analyze_site({"final_url": "http://reef.com/", "pages": [
         page("http://reef.com/", "<html><body><p>Hi</p></body></html>"),
         page("http://reef.com/book-your-trip", BOOK_PHONE_ONLY, "booking")]})
     assert facts["booking_tools"] == [] and facts["booking_pages"] == ["http://reef.com/book-your-trip"]
     assert facts["contact_form"] is True and facts["https"] is False and facts["mobile_friendly"] is False
     lines = describe_site_facts(facts)
-    assert any("didn't find" in l and "/book-your-trip" in l for l in lines)
+    # A /book-now style page usually loads its system with scripts we can't see: never pitch booking as missing.
+    assert not any("didn't find" in l for l in lines)
+    assert any("already" in l and "/book-your-trip" in l for l in lines)
     assert any("HTTPS" in l for l in lines) and any("mobile" in l.lower() for l in lines)
+
+
+@pytest.mark.parametrize("path", ["/book-now", "/reservations/", "/tickets", "/register-online/", "/appointments",
+                                  "/enroll", "/sign-up", "/Book_A_Party"])
+def test_booking_words_in_the_page_path_count_as_booking(path):
+    facts = {"checked": True, "booking_tools": [], "external_booking_hosts": [], "booking_pages": [f"https://x.com{path}"]}
+    assert not any("didn't find" in l for l in describe_site_facts(facts))
+
+
+@pytest.mark.parametrize("path", ["/menus/", "/services", "/rates", "/schedule", "/parties.html", "/order-catering"])
+def test_other_pages_the_scraper_reads_are_not_booking(path):
+    facts = {"checked": True, "booking_tools": [], "external_booking_hosts": [], "booking_pages": [f"https://x.com{path}"]}
+    assert any("didn't find" in l and path in l for l in describe_site_facts(facts))
 
 
 def test_lines_say_they_already_use_a_tool():
@@ -119,7 +134,7 @@ def test_booking_on_another_site_is_recorded():
 
 
 def test_not_found_wording_is_hedged():
-    lines = _facts("<p>Call to reserve.</p>")["lines"]
+    lines = _facts("<p>Call to reserve.</p>", url="https://x.com/rates")["lines"]
     line = next(l for l in lines if "booking" in l)
     assert "didn't find" in line and "may" in line
     assert "phone, email or a form" not in line

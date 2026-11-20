@@ -346,18 +346,32 @@ async def test_campaign_list_reports_drafted_count(db, client):
 
 # ---------- site facts reach the draft ----------
 
-async def test_drafting_passes_stored_site_facts(db, monkeypatch):
+# What analyze_site stored for a lead before booking pages counted as booking: the facts, plus lines
+# in the old wording (claiming no booking was found, though /book-now exists).
+STALE_FACTS = {
+    "checked": True, "booking_tools": [], "external_booking_hosts": [], "marketing_tools": [],
+    "booking_pages": ["https://a.com/book-now"], "contact_form": True, "site_builder": "WordPress",
+    "mobile_friendly": True, "https": True, "copyright_year": 2026,
+    "pages_checked": ["https://a.com/", "https://a.com/book-now"],
+    "lines": ["We didn't find an online booking or scheduling tool on the pages we checked, including their "
+              "/book-now page, but one may load in a way we can't see.", "They have a contact form."],
+}
+
+
+async def test_drafting_describes_stored_site_facts_in_the_current_wording(db, monkeypatch):
     import json
     copy = FakeCopy()
     monkeypatch.setattr(drafting, "generate_cold_email", copy)
     cid = await _campaign(db)
     lid = await _lead(db, cid, "a.com")
     async with aiosqlite.connect(db) as c:
-        await c.execute("UPDATE leads SET site_facts = ? WHERE id = ?",
-                        (json.dumps({"checked": True, "lines": ["They have a contact form."]}), lid))
+        await c.execute("UPDATE leads SET site_facts = ? WHERE id = ?", (json.dumps(STALE_FACTS), lid))
         await c.commit()
     await drafting.draft_leads([lid])
-    assert copy.calls[0]["site_facts"] == ["They have a contact form."]
+    lines = copy.calls[0]["site_facts"]
+    assert not any("didn't find" in l for l in lines)
+    assert any("already" in l and "/book-now" in l for l in lines)
+    assert "They have a contact form." in lines
 
 
 async def test_drafting_checks_the_site_when_a_lead_has_no_facts(db, monkeypatch):

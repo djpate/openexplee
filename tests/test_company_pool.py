@@ -37,6 +37,22 @@ def test_clean_drops_brand_platform_chain_franchise_held_suppressed():
     assert [x["domain"] for x in out] == ["ok.com"]
 
 
+@pytest.mark.parametrize("url", [
+    "https://www.eventbrite.com/e/impulse-studios-open-house-tickets-123", "https://fareharbor.com/embeds/book/reef/",
+    "https://clients.mindbodyonline.com/classic/ws?studioid=1", "https://www.vagaro.com/studio", "https://booksy.com/x",
+    "https://www.groupon.com/deals/escape", "https://www.meetup.com/tampa-dance/", "https://www.toasttab.com/x",
+    "https://www.opentable.com/r/x", "https://www.ticketmaster.com/venue/1", "https://classpass.com/studios/x",
+])
+def test_a_listing_that_links_to_a_booking_or_ticketing_platform_is_dropped(url):
+    # Its website is the platform's page: the emails found there are the platform's, not the business's.
+    assert clean_candidates([p(url)], set(), set()) == []
+
+
+def test_a_business_domain_that_contains_a_platform_name_is_kept():
+    assert [x["domain"] for x in clean_candidates([p("https://myeventbriteparties.com")], set(), set())] == \
+        ["myeventbriteparties.com"]
+
+
 def test_clean_dedupes_by_domain_keeping_highest_confidence_and_orders_by_tier():
     out = clean_candidates([p("a.com", confidence=0.6, tier=2), p("a.com", confidence=0.9, tier=2),
                             p("b.com", tier=1)], set(), set())

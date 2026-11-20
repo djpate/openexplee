@@ -11,6 +11,7 @@ from app.engine.discovery import _extract_people_with_llm
 from app.engine.scraper import scrape_company_website
 from app.engine.site_check import analyze_site
 from app.engine.fit import rate_lead_fit
+from app.engine.target_screen import screen_pending
 from app.engine.verifier import enrich_person_email, verify_email_smtp
 
 # Bot walls: the site is alive but refuses scrapers, so only the Overture emails count.
@@ -71,8 +72,9 @@ def _own_domain_emails(emails, domain: str) -> list[str]:
     return out
 
 
-async def enrich_company(company: dict, value_prop: str) -> dict:
+async def enrich_company(company: dict, value_prop: str, target: str = "") -> dict:
     """Scrape, find and check emails, and build the lead for one pool row (no email draft).
+    `target` is the campaign's description of who it's for (the fit rating checks it).
 
     Returns {"lead": {...}} or {"skip_reason": str}.
     """
@@ -121,7 +123,7 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
     phones = _json_list(company.get("phones"))
     facts = analyze_site(intel)
     # How much they likely need what this campaign offers (cheap bulk model); None if unrated.
-    fit_score, fit_reason = await rate_lead_fit(company_name, domain, summary, facts.get("lines"), value_prop)
+    fit_score, fit_reason = await rate_lead_fit(company_name, domain, summary, facts.get("lines"), value_prop, target)
     return {"lead": {
         "campaign_id": company.get("campaign_id"),
         "company_name": company_name,
@@ -147,7 +149,8 @@ async def enrich_company(company: dict, value_prop: str) -> dict:
 
 
 async def claim_pending(campaign_id: int, n: int) -> list[dict]:
-    """Atomically move the next n pending rows to 'processing' and return them."""
+    """Atomically move the next n pending rows to 'processing' and return them: by area tier, then the
+    best target match (unscored counts as a maybe), then Overture's confidence."""
     if n <= 0:
         return []
     conn = await get_db_connection()
@@ -155,12 +158,14 @@ async def claim_pending(campaign_id: int, n: int) -> list[dict]:
         cur = await conn.execute(
             "UPDATE campaign_companies SET status = 'processing' WHERE id IN ("
             "SELECT id FROM campaign_companies WHERE campaign_id = ? AND status = 'pending' "
-            "ORDER BY tier, confidence DESC, id LIMIT ?) RETURNING *", (campaign_id, n))
+            "ORDER BY tier, COALESCE(target_match, 1) DESC, confidence DESC, id LIMIT ?) RETURNING *",
+            (campaign_id, n))
         rows = [dict(r) for r in await cur.fetchall()]
         await conn.commit()
     finally:
         await conn.close()
-    return sorted(rows, key=lambda r: (r["tier"] or 0, -(r["confidence"] or 0), r["id"]))
+    return sorted(rows, key=lambda r: (r["tier"] or 0, -(1 if r["target_match"] is None else r["target_match"]),
+                                       -(r["confidence"] or 0), r["id"]))
 
 
 async def _gate(company: dict) -> Optional[dict]:
@@ -233,10 +238,10 @@ async def _release(company: dict) -> None:
         await conn.close()
 
 
-async def _process_row(company: dict, value_prop: str, sem: asyncio.Semaphore) -> Optional[dict]:
+async def _process_row(company: dict, value_prop: str, target: str, sem: asyncio.Semaphore) -> Optional[dict]:
     async with sem:
         try:
-            result = await _gate(company) or await enrich_company(company, value_prop)
+            result = await _gate(company) or await enrich_company(company, value_prop, target)
             outcome = await _finish_row(company, result)
         except Exception as e:
             # Not a skip: put the row back so a later batch retries it.
@@ -251,11 +256,15 @@ async def _process_row(company: dict, value_prop: str, sem: asyncio.Semaphore) -
         return outcome
 
 
-async def process_next_batch(campaign_id: int, batch_size: int, value_prop: str) -> dict:
-    """Claim the next batch of pending rows and turn them into leads in parallel."""
+async def process_next_batch(campaign_id: int, batch_size: int, value_prop: str, target: str = "") -> dict:
+    """Claim the next batch of pending rows and turn them into leads in parallel.
+    `target` is the campaign's description of who it's for (its ICP): newly found businesses are
+    scored against it first, so the best matches go first."""
+    if target:
+        await screen_pending(campaign_id, target)
     rows = await claim_pending(campaign_id, batch_size)
     sem = asyncio.Semaphore(max(1, settings.discovery_concurrency))
-    outcomes = await asyncio.gather(*(_process_row(r, value_prop, sem) for r in rows))
+    outcomes = await asyncio.gather(*(_process_row(r, value_prop, target, sem) for r in rows))
     await refresh_pool_counters(campaign_id)
     done = [o for o in outcomes if o is not None]
     lead_ids = [o["new_lead_id"] for o in done if "new_lead_id" in o]

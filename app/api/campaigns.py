@@ -139,7 +139,7 @@ async def run_discovery_task(campaign_id: int) -> None:
         conn = await get_db_connection()
         try:
             cur = await conn.execute(
-                "SELECT search_plan, overture_release, batch_size, value_proposition FROM campaigns WHERE id = ?",
+                "SELECT search_plan, overture_release, batch_size, value_proposition, icp_prompt FROM campaigns WHERE id = ?",
                 (campaign_id,))
             camp = await cur.fetchone()
         finally:
@@ -153,7 +153,8 @@ async def run_discovery_task(campaign_id: int) -> None:
         if not camp["search_plan"] or not camp["overture_release"]:
             message = _joined(await refresh_campaign_pool(campaign_id))
         await process_next_batch(
-            campaign_id, camp["batch_size"] or settings.discovery_batch_size, camp["value_proposition"] or "")
+            campaign_id, camp["batch_size"] or settings.discovery_batch_size, camp["value_proposition"] or "",
+            camp["icp_prompt"] or "")
         await _set_campaign(campaign_id, "ready", message)
     except Exception as e:
         print(f"[Campaign Task Error]: {e}")
@@ -178,7 +179,8 @@ async def list_campaigns():
         SELECT c.*,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.verification_status IN ('verified', 'deliverable')) as verified_count,
             (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'done') as pool_done,
-            (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'skipped') as pool_skipped,
+            (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'skipped' AND COALESCE(cc.skip_reason, '') != 'off_target') as pool_skipped,
+            (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'skipped' AND cc.skip_reason = 'off_target') as pool_off_target,
             (SELECT COUNT(*) FROM campaign_companies cc WHERE cc.campaign_id = c.id AND cc.status = 'processing') as pool_processing,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status = 'sent') as sent_leads_count,
             (SELECT COUNT(*) FROM leads l WHERE l.campaign_id = c.id AND l.status IN ('enriched', 'queued', 'discovered') AND l.verification_status != 'invalid' AND l.email IS NOT NULL AND l.email != '' AND {q}) as ready_leads_count,

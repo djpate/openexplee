@@ -11,6 +11,10 @@ from app.database import get_db_connection
 PLATFORM_HOSTS: tuple[str, ...] = (
     "facebook", "instagram", "linkedin", "yelp", "linktr.ee", "google", "twitter", "x.com",
     "tiktok", "youtube", "wixsite", "godaddysites", "square.site", "business.site", "hub.biz",
+    # Booking, ticketing and deal platforms: a listing that links to one has no site of its own here,
+    # and the addresses found on that page are the platform's.
+    "eventbrite.com", "fareharbor.com", "mindbodyonline.com", "vagaro.com", "booksy.com", "groupon.com",
+    "meetup.com", "toasttab.com", "opentable.com", "ticketmaster.com", "classpass.com",
 )
 
 FRANCHISE_DOMAINS: frozenset = frozenset({

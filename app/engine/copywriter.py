@@ -22,15 +22,18 @@ def default_draft_instructions() -> str:
     else:
         ask = "End with one easy question they can answer by replying to this email. Don't ask for a call or a meeting."
     return "\n".join([
-        "- They don't know us, so say who we are in the first two sentences: our name, company, that we're a "
-        "local team, and what we do in plain words.",
-        "- Give one concrete reason we're writing to them specifically: a single detail from their website, "
-        "stated plainly. Don't recite their website back to them or flatter them, and don't guess at problems "
-        "with their site or business; we haven't audited it.",
+        "- Open with the one concrete reason we're writing to them specifically: a single detail from their "
+        "website that connects to what we'd do for them, stated plainly. Don't recite their website back to "
+        "them or flatter them, and don't guess at problems with their site or business; we haven't audited it.",
+        "- They don't know us, so within the first two sentences say who we are: our name, company, that we're "
+        "local, and only the part of what we do that matters for this email, not our whole list of services. "
+        "Put it in your own words for this email, not a stock line like \"I'm <name> from <company>, a small "
+        "team that builds...\": many businesses get one of these emails, and they must not read alike.",
         "- Say what we'd actually do for them, in one or two plain sentences, based on the verified facts "
         "about their website.",
         f"- {ask}",
-        "- 60 to 90 words. Friendly, plain, peer-to-peer. No buzzwords, no hype, no exclamation marks.",
+        "- 60 to 90 words in two to four short paragraphs, with the question on its own line. Friendly, plain, "
+        "peer-to-peer. No buzzwords, no hype, no exclamation marks.",
         '- Subject: 2 to 5 lowercase words specific to them. Never start it with "quick question".',
     ])
 
