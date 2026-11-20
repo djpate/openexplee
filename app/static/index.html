@@ -250,7 +250,7 @@
           </div>
           <label class="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
             <input type="checkbox" id="autopilot-autosend" class="rounded bg-slate-900 border-slate-700 text-indigo-500">
-            <span>Automatically start sending verified leads using connected safe inboxes (with Cal.com booking link)</span>
+            <span>Turn on Autopilot: find leads and send every weekday from your connected inboxes</span>
           </label>
         </div>
 
@@ -1042,9 +1042,9 @@
     function renderAutoSend(c) {
       const on = Number(c.auto_send) === 1;
       return `
-        <label class="text-xs text-slate-400 mt-1 flex items-center gap-2" title="Weekdays during sending hours, up to each inbox's daily limit">
+        <label class="text-xs text-slate-400 mt-1 flex items-center gap-2" title="Each weekday during sending hours it sends up to your inboxes' daily limit, and finds more leads (up to 3 batches a day) when fewer than 2 days' worth are waiting">
           <input type="checkbox" class="rounded bg-slate-900 border-slate-700" onchange="setAutoSend(${Number(c.id)}, this.checked)"${on ? ' checked' : ''}>
-          Send automatically each weekday
+          Autopilot: find leads and send every weekday
         </label>`;
     }
 
@@ -1052,8 +1052,12 @@
       const res = await fetch(`/api/campaigns/${Number(id)}/auto-send`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!enabled })
       });
-      if (!res.ok) return showToast('Could not change automatic sending', 'error');
-      showToast(enabled ? 'Sends automatically on weekdays during sending hours' : 'Automatic sending off');
+      if (!res.ok) return showToast('Could not change Autopilot', 'error');
+      const data = await res.json().catch(() => ({}));
+      const waiting = (data.waiting_for || []).join(' and ');
+      showToast(!enabled ? 'Autopilot off'
+        : waiting ? `Autopilot on. It starts once you add ${waiting}.`
+        : 'Autopilot on: it finds leads and sends on weekdays during sending hours');
       loadCampaigns();
     }
 

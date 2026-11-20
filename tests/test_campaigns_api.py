@@ -12,7 +12,7 @@ from app.main import app
 
 @pytest.fixture
 def calls(monkeypatch):
-    c = {"refresh": [], "batch": [], "send": []}
+    c = {"refresh": [], "batch": []}
 
     async def fake_refresh(cid):
         c["refresh"].append(cid)
@@ -22,12 +22,8 @@ def calls(monkeypatch):
         c["batch"].append((cid, size, vp))
         return {"processed": 3, "leads": 2, "skipped": 1, "lead_ids": [1, 2]}
 
-    async def fake_send(cid, limit=20):
-        c["send"].append((cid, limit))
-
     monkeypatch.setattr(campaigns, "refresh_campaign_pool", fake_refresh)
     monkeypatch.setattr(campaigns, "process_next_batch", fake_batch)
-    monkeypatch.setattr(campaigns, "dispatch_campaign_batch", fake_send)
     return c
 
 
@@ -62,13 +58,6 @@ async def test_create_runs_search_then_one_batch(db, calls):
     await campaigns.run_discovery_task(cid)
     assert calls["refresh"] == [cid] and calls["batch"] == [(cid, 50, "vp")]
     assert (await _row(cid))["status"] == "ready"
-    assert calls["send"] == []
-
-
-async def test_auto_send_dispatches_created_leads(db, calls):
-    cid = await _make()
-    await campaigns.run_discovery_task(cid, True)
-    assert calls["send"] == [(cid, 2)]
 
 
 async def test_discover_does_not_search_again_when_plan_exists(db, calls):

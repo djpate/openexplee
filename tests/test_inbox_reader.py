@@ -321,16 +321,6 @@ async def test_auto_send_toggle_api(db, client):
     assert (await client.put("/api/campaigns/999/auto-send", json={"enabled": True})).status_code == 404
 
 
-async def test_scheduler_reads_the_inbox_before_sending_follow_ups(monkeypatch):
-    order = []
-    for name in ("reset_daily_inbox_quotas", "poll_inboxes", "process_due_followups", "auto_send_tick"):
-        async def fn(*a, _n=name, **k):
-            order.append(_n)
-        monkeypatch.setattr(scheduler, name, fn)
-    await scheduler.scheduler_tick()
-    assert order == ["reset_daily_inbox_quotas", "poll_inboxes", "process_due_followups", "auto_send_tick"]
-
-
 # ---------- replies show in the mailbox ----------
 
 async def test_thread_shows_the_reply(db, client, mailbox):

@@ -1,4 +1,7 @@
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from app.config import settings
 from app.database import get_db_connection
 from app.engine.inbox_reader import poll_inboxes
@@ -86,7 +89,7 @@ async def process_due_followups(limit: int = 10) -> int:
     return sent_count
 
 
-# Campaigns sending because of auto-send, so a tick never starts a second batch for one.
+# Campaigns sending or finding leads because of autopilot, so a tick never starts a second task for one.
 _AUTO_TASKS: dict = {}
 
 
@@ -123,13 +126,100 @@ async def auto_send_tick() -> list:
     return started
 
 
+# Autopilot finds more leads when fewer than this many days of sending are waiting...
+TOPUP_DAYS = 2
+# ...running at most this many discovery batches per campaign per day (caps the cost when a
+# batch turns up few qualified leads).
+MAX_TOPUP_BATCHES_PER_DAY = 3
+
+POOL_CHECKED_MESSAGE = ("Autopilot: every business this search found has been checked. "
+                        "Click Refresh search to look again, or widen the campaign to find more.")
+
+
+def _today() -> str:
+    """Today's date where sending happens, so the daily batch limit resets with the sending day."""
+    return datetime.now(ZoneInfo(settings.send_timezone)).date().isoformat()
+
+
+async def daily_send_capacity() -> int:
+    """How many emails all active inboxes can send in a day."""
+    conn = await get_db_connection()
+    try:
+        row = await (await conn.execute(
+            "SELECT COALESCE(SUM(daily_quota), 0) AS c FROM inboxes WHERE status = 'active'")).fetchone()
+        return row["c"] if row else 0
+    finally:
+        await conn.close()
+
+
+async def autopilot_topup_tick() -> list:
+    """Starts a discovery batch for each auto-send campaign that has fewer than TOPUP_DAYS of
+    qualified leads waiting, at most MAX_TOPUP_BATCHES_PER_DAY a day. Nothing runs without a
+    sending inbox. Returns the campaign ids started."""
+    from app.api.campaigns import run_discovery_task  # the API module imports the engine; avoid a cycle
+
+    capacity = await daily_send_capacity()
+    if capacity <= 0:
+        return []
+    today = _today()
+    conn = await get_db_connection()
+    try:
+        cur = await conn.execute(
+            "SELECT id, pool_pending, overture_release, discovery_message, autopilot_day, autopilot_batches "
+            "FROM campaigns WHERE auto_send = 1 AND COALESCE(status, '') NOT IN ('sending', 'discovering')")
+        rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await conn.close()
+
+    started = []
+    for camp in rows:
+        cid = camp["id"]
+        task = _AUTO_TASKS.get(cid)
+        if task and not task.done():
+            continue
+        if camp["autopilot_day"] == today and (camp["autopilot_batches"] or 0) >= MAX_TOPUP_BATCHES_PER_DAY:
+            continue
+        if await sendable_count(cid) >= TOPUP_DAYS * capacity:
+            continue
+        # A completed search with nothing left to check. (Without a completed search,
+        # run_discovery_task fetches the businesses first.)
+        if camp["overture_release"] and not camp["pool_pending"]:
+            if camp["discovery_message"] != POOL_CHECKED_MESSAGE:
+                conn = await get_db_connection()
+                try:
+                    await conn.execute("UPDATE campaigns SET discovery_message = ? WHERE id = ?",
+                                       (POOL_CHECKED_MESSAGE, cid))
+                    await conn.commit()
+                finally:
+                    await conn.close()
+            continue
+        conn = await get_db_connection()
+        try:
+            # Claim it (unless someone clicked Find leads or Launch meanwhile) and count today's batch.
+            cur = await conn.execute(
+                "UPDATE campaigns SET status = 'discovering', autopilot_day = ?, "
+                "autopilot_batches = CASE WHEN autopilot_day = ? THEN COALESCE(autopilot_batches, 0) + 1 ELSE 1 END "
+                "WHERE id = ? AND auto_send = 1 AND COALESCE(status, '') NOT IN ('sending', 'discovering')",
+                (today, today, cid))
+            await conn.commit()
+        finally:
+            await conn.close()
+        if not cur.rowcount:
+            continue
+        _AUTO_TASKS[cid] = asyncio.create_task(run_discovery_task(cid))
+        started.append(cid)
+    return started
+
+
 async def scheduler_tick() -> None:
-    """One pass: reset quotas, read inboxes (so fresh replies stop follow-ups), follow-ups, auto-send."""
+    """One pass: reset quotas, read inboxes (so fresh replies stop follow-ups), follow-ups, auto-send,
+    then find more leads for autopilot campaigns running low (after sending, so today's sends go first)."""
     await reset_daily_inbox_quotas()
     await poll_inboxes()
     # One per tick (every 5 minutes), so follow-ups are spaced out too.
     await process_due_followups(limit=1)
     await auto_send_tick()
+    await autopilot_topup_tick()
 
 
 async def run_scheduler_loop(interval_seconds: int = 300) -> None:

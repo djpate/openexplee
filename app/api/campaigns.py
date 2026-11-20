@@ -12,7 +12,7 @@ from app.engine.overture import OvertureError
 from app.engine.search_plan import PlanError
 from app.engine import sequencer as _sequencer
 from app.engine.sequencer import (
-    POSTAL_ADDRESS_MISSING, compliance_ready, dispatch_campaign_batch, get_next_available_inbox,
+    POSTAL_ADDRESS_MISSING, compliance_ready, get_next_available_inbox,
     run_campaign_send, send_window_text,
 )
 from app.engine.analyzer import analyze_my_product
@@ -58,15 +58,16 @@ async def launch_autopilot(req: AutopilotRequest, background_tasks: BackgroundTa
             icp_query = icp.get("icp_query") or value_prop
             cursor = await conn.execute(
                 """
-                INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size)
-                VALUES (?, ?, ?, ?, 'discovering', ?)
+                INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size,
+                                       auto_send)
+                VALUES (?, ?, ?, ?, 'discovering', ?, ?)
                 """,
                 (camp_name, icp_query, product_name[:80], value_prop,
-                 max(1, min(req.leads_per_campaign, 1000))),
+                 max(1, min(req.leads_per_campaign, 1000)), 1 if req.auto_send else 0),
             )
             cid = cursor.lastrowid
             created.append({"id": cid, "name": camp_name, "icp_query": icp_query})
-            background_tasks.add_task(run_discovery_task, cid, req.auto_send)
+            background_tasks.add_task(run_discovery_task, cid)
         await conn.commit()
     finally:
         await conn.close()
@@ -131,7 +132,8 @@ def _failure_message(e: Exception) -> str:
     return f"Discovery failed: {type(e).__name__}: {e}"
 
 
-async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
+async def run_discovery_task(campaign_id: int) -> None:
+    """Finds the next batch of leads. Sending is the scheduler's job (autopilot), never this task's."""
     await _set_campaign(campaign_id, "discovering")
     try:
         conn = await get_db_connection()
@@ -150,11 +152,9 @@ async def run_discovery_task(campaign_id: int, auto_send: bool = False) -> None:
         # failed or was interrupted (the release is set only when a fetch completes).
         if not camp["search_plan"] or not camp["overture_release"]:
             message = _joined(await refresh_campaign_pool(campaign_id))
-        res = await process_next_batch(
+        await process_next_batch(
             campaign_id, camp["batch_size"] or settings.discovery_batch_size, camp["value_proposition"] or "")
         await _set_campaign(campaign_id, "ready", message)
-        if auto_send:
-            await dispatch_campaign_batch(campaign_id, limit=res.get("leads", 0))
     except Exception as e:
         print(f"[Campaign Task Error]: {e}")
         await _set_campaign(campaign_id, "error", _failure_message(e))
@@ -228,16 +228,16 @@ async def create_campaign(req: CampaignCreate, background_tasks: BackgroundTasks
     batch_size = max(1, min(req.batch_size or settings.discovery_batch_size, 1000))
     cursor = await conn.execute("""
         INSERT INTO campaigns (name, icp_prompt, target_industry, value_proposition, status, batch_size,
-                               draft_instructions)
-        VALUES (?, ?, ?, ?, 'draft', ?, ?)
+                               draft_instructions, auto_send)
+        VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)
     """, (req.name, req.icp_prompt, req.target_industry, req.value_proposition, batch_size,
-          _custom_instructions(req.draft_instructions)))
+          _custom_instructions(req.draft_instructions), 1 if req.auto_send else 0))
     campaign_id = cursor.lastrowid
     await conn.commit()
     await conn.close()
 
     # Automatically trigger discovery in the background
-    background_tasks.add_task(run_discovery_task, campaign_id, req.auto_send)
+    background_tasks.add_task(run_discovery_task, campaign_id)
 
     return {"id": campaign_id, "name": req.name, "status": "discovering"}
 
@@ -286,7 +286,7 @@ async def _claim_discovery(campaign_id: int):
 @router.post("/{campaign_id}/discover")
 async def trigger_campaign_discovery(campaign_id: int, background_tasks: BackgroundTasks):
     await _claim_discovery(campaign_id)
-    background_tasks.add_task(run_discovery_task, campaign_id, False)
+    background_tasks.add_task(run_discovery_task, campaign_id)
     return {"id": campaign_id, "status": "discovering"}
 
 
@@ -296,7 +296,9 @@ class AutoSendUpdate(BaseModel):
 
 @router.put("/{campaign_id}/auto-send")
 async def update_auto_send(campaign_id: int, req: AutoSendUpdate):
-    """When on, the scheduler sends this campaign on weekdays during sending hours, up to each inbox's limit."""
+    """Autopilot. When on, the scheduler sends this campaign on weekdays during sending hours, up to
+    each inbox's daily limit, and finds more leads when fewer than two days' worth are waiting.
+    `waiting_for` lists what it still needs before it can start."""
     conn = await get_db_connection()
     try:
         cur = await conn.execute("UPDATE campaigns SET auto_send = ? WHERE id = ?", (1 if req.enabled else 0, campaign_id))
@@ -305,7 +307,21 @@ async def update_auto_send(campaign_id: int, req: AutoSendUpdate):
             raise HTTPException(status_code=404, detail="Campaign not found")
     finally:
         await conn.close()
-    return {"ok": True, "auto_send": req.enabled}
+    waiting_for = []
+    if req.enabled:
+        if not await _has_active_inbox():
+            waiting_for.append("a sending inbox")
+        if not compliance_ready():
+            waiting_for.append("your postal address in Settings")
+    return {"ok": True, "auto_send": req.enabled, "waiting_for": waiting_for}
+
+
+async def _has_active_inbox() -> bool:
+    conn = await get_db_connection()
+    try:
+        return bool(await (await conn.execute("SELECT 1 FROM inboxes WHERE status = 'active' LIMIT 1")).fetchone())
+    finally:
+        await conn.close()
 
 
 class MinFitUpdate(BaseModel):

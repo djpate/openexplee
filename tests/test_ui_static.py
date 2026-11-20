@@ -277,7 +277,8 @@ def test_auto_send_switch(tmp_path):
     off = run_js(tmp_path, ["escapeHtml", "renderAutoSend"], "renderAutoSend({id: 7, auto_send: 0})")
     assert 'onchange="setAutoSend(7, this.checked)" checked>' in on
     assert 'onchange="setAutoSend(7, this.checked)">' in off
-    assert "/auto-send" in HTML
+    assert "Autopilot" in on and "find leads and send" in on
+    assert "/auto-send" in HTML and "waiting_for" in HTML
 
 
 def test_inbound_message_is_escaped(tmp_path):
